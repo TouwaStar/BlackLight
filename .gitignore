@@ -1,6 +1,6 @@
 # Binaries
-blacklight
-servicemap
+/blacklight
+/servicemap
 *.exe
 
 # SQLite data

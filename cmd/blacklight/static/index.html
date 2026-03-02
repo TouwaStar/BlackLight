@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blacklight</title>
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/layout-base@2.0.1/layout-base.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/cose-base@2.2.0/cose-base.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape-fcose@2.2.0/cytoscape-fcose.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; }
+    body {
+      font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+      background: #0d1117;
+      color: #e6edf3;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 0.6rem 1.25rem;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    h1 { font-size: 1.1rem; font-weight: 600; }
+    .controls { display: flex; gap: 0.75rem; align-items: center; }
+    a { color: #58a6ff; text-decoration: none; font-size: 0.8rem; }
+    a:hover { text-decoration: underline; }
+    .hint { color: #484f58; font-size: 0.7rem; }
+    #status { font-size: 0.7rem; font-weight: 600; }
+    .filter-btn {
+      font-family: inherit; font-size: 0.7rem; font-weight: 600;
+      background: transparent; color: #8b949e; border: 1px solid #30363d;
+      border-radius: 4px; padding: 0.2rem 0.6rem; cursor: pointer;
+      transition: all 0.15s;
+    }
+    .filter-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+    .filter-btn.active { background: #388bfd22; border-color: #58a6ff; color: #58a6ff; }
+    .filter-btn.active-warn { background: #f8514922; border-color: #f85149; color: #f85149; }
+    #cy { flex: 1; }
+    #tooltip {
+      display: none;
+      position: fixed;
+      background: #1c2129;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.75rem;
+      color: #c9d1d9;
+      max-width: 350px;
+      pointer-events: none;
+      z-index: 100;
+      line-height: 1.5;
+    }
+    #tooltip strong { color: #e6edf3; }
+    .legend {
+      display: flex; gap: 1rem; align-items: center; font-size: 0.7rem; color: #8b949e;
+    }
+    .legend-item { display: flex; align-items: center; gap: 0.3rem; }
+    .legend-dot {
+      width: 10px; height: 10px; border-radius: 2px; display: inline-block;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Blacklight</h1>
+    <div class="legend">
+      <div class="legend-item"><span class="legend-dot" style="background:#f0883e"></span> Ingress</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#3fb950"></span> Deployment</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#a371f7"></span> StatefulSet</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#d29922"></span> DaemonSet</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#79c0ff"></span> CronJob</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#7ee787"></span> Job</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#58a6ff"></span> Service (standalone)</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#39d353;border-radius:50%"></span> Active traffic</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#f85149;border-radius:50%"></span> Connection errors</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#484f58;border:1px dashed #8b949e"></span> No traffic observed</div>
+    </div>
+    <div class="controls">
+      <span id="status" style="color:#d29922">connecting...</span>
+      <button id="autoArrange" class="filter-btn active" onclick="toggleAutoArrange()">Auto arrange: ON</button>
+      <button id="deadFilter" class="filter-btn" onclick="toggleDeadFilter()">Show dead services</button>
+      <span class="hint">scroll to zoom &middot; drag to pan &middot; click node to highlight</span>
+      <a href="/api/graph">JSON</a>
+      <a href="/api/mermaid">Mermaid</a>
+    </div>
+  </header>
+  <div id="cy"></div>
+  <div id="tooltip"></div>
+
+  <script>
+    const KIND_COLORS = {
+      Ingress: '#f0883e', Service: '#58a6ff', Deployment: '#3fb950',
+      StatefulSet: '#a371f7', DaemonSet: '#d29922',
+      CronJob: '#79c0ff', Job: '#7ee787',
+    };
+    const EDGE_COLORS = {
+      ingress_backend: '#f0883e',
+      env_ref: '#d29922', code_ref: '#a371f7',
+      traffic: '#39d353',
+    };
+    const KIND_SHAPES = {
+      Ingress: 'round-diamond', Service: 'round-rectangle',
+      Deployment: 'round-rectangle', StatefulSet: 'barrel', DaemonSet: 'hexagon',
+      CronJob: 'diamond', Job: 'tag',
+    };
+
+    const STYLES = [
+      {
+        selector: 'node',
+        style: {
+          'label': 'data(label)', 'text-valign': 'center', 'text-halign': 'center',
+          'font-size': '12px',
+          'font-family': "'JetBrains Mono', 'SF Mono', Consolas, monospace",
+          'color': '#e6edf3', 'text-outline-color': '#0d1117', 'text-outline-width': 2,
+          'width': 'label', 'height': 36, 'padding': '14px',
+          'shape': 'round-rectangle', 'background-color': '#58a6ff',
+          'border-width': 1, 'border-color': '#30363d',
+        }
+      },
+      ...Object.entries(KIND_COLORS).map(([kind, color]) => ({
+        selector: `node[kind="${kind}"]`,
+        style: { 'background-color': color, 'shape': KIND_SHAPES[kind] || 'round-rectangle' }
+      })),
+      {
+        selector: 'edge',
+        style: {
+          'width': 1.5, 'line-color': '#30363d', 'target-arrow-color': '#30363d',
+          'target-arrow-shape': 'triangle', 'curve-style': 'bezier',
+          'control-point-step-size': 40,
+          'arrow-scale': 1.2, 'line-opacity': 0.5,
+          'mid-target-arrow-shape': 'triangle', 'mid-target-arrow-color': '#30363d',
+          'mid-target-arrow-size': 0.6,
+        }
+      },
+      ...Object.entries(EDGE_COLORS).map(([kind, color]) => ({
+        selector: `edge[kind="${kind}"]`,
+        style: { 'line-color': color, 'target-arrow-color': color, 'mid-target-arrow-color': color }
+      })),
+      // Traffic states
+      {
+        selector: '.traffic-active',
+        style: {
+          'line-color': '#39d353', 'target-arrow-color': '#39d353',
+          'mid-target-arrow-color': '#39d353', 'z-index': 10,
+        }
+      },
+      {
+        selector: '.traffic-idle',
+        style: { 'line-opacity': 0.35, 'width': 1 }
+      },
+      {
+        selector: '.traffic-error',
+        style: {
+          'line-color': '#f85149', 'target-arrow-color': '#f85149',
+          'mid-target-arrow-color': '#f85149',
+          'line-style': 'dashed', 'line-dash-pattern': [6, 3],
+          'z-index': 10,
+        }
+      },
+      // Highlight on click
+      {
+        selector: 'node.highlighted',
+        style: { 'border-width': 2, 'border-color': '#ffffff', 'z-index': 10 }
+      },
+      {
+        selector: 'edge.highlighted',
+        style: {
+          'width': 3, 'line-opacity': 1, 'z-index': 10,
+          'label': 'data(fullLabel)', 'font-size': '9px', 'color': '#e6edf3',
+          'font-family': "'JetBrains Mono', monospace",
+          'text-rotation': 'autorotate',
+          'text-outline-color': '#0d1117', 'text-outline-width': 1.5, 'text-margin-y': -8,
+        }
+      },
+      { selector: '.dimmed', style: { 'opacity': 0.15 } },
+      {
+        selector: '.never-active',
+        style: {
+          'background-opacity': 0.4, 'border-style': 'dashed',
+          'border-width': 2, 'border-color': '#484f58',
+        }
+      },
+    ];
+
+    let cy = null;
+    let nodeStats = new Map(); // node_id → {first_seen, last_traffic, total_conns}
+    let pulseRAF = null;
+    let deadFilterActive = false;
+    let autoArrange = true;
+    let savedPositions = new Map(); // node id → {x, y}
+    let lastGraphFingerprint = '';
+    let positionsDirty = false;
+    let positionsLoaded = false;
+
+    function graphFingerprint(graph) {
+      const nodes = (graph.nodes || []).map(n => n.id).sort().join(',');
+      const edges = (graph.edges || []).map(e => e.from + '>' + e.to + ':' + e.kind).sort().join(',');
+      return nodes + '|' + edges;
+    }
+
+    function toggleAutoArrange() {
+      autoArrange = !autoArrange;
+      const btn = document.getElementById('autoArrange');
+      btn.classList.toggle('active', autoArrange);
+      btn.textContent = autoArrange ? 'Auto arrange: ON' : 'Auto arrange: OFF';
+      if (autoArrange) runLayout();
+    }
+
+    function savePositions() {
+      if (!cy) return;
+      cy.nodes().forEach(n => {
+        savedPositions.set(n.id(), { ...n.position() });
+      });
+      positionsDirty = true;
+    }
+
+    // Persist positions to server (debounced, called periodically).
+    function persistPositions() {
+      if (!positionsDirty || savedPositions.size === 0) return;
+      positionsDirty = false;
+      const arr = [];
+      savedPositions.forEach((pos, id) => {
+        arr.push({ node_id: id, x: pos.x, y: pos.y });
+      });
+      fetch('/api/positions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(arr),
+      }).catch(() => {});
+    }
+    setInterval(persistPositions, 10000); // save every 10s if dirty
+
+    // Load positions from server on startup.
+    function loadPositions() {
+      return fetch('/api/positions').then(r => r.json()).then(positions => {
+        if (!positions || positions.length === 0) return;
+        for (const p of positions) {
+          savedPositions.set(p.node_id, { x: p.x, y: p.y });
+        }
+        positionsLoaded = true;
+      }).catch(() => {});
+    }
+
+    function getLayoutConfig(animate) {
+      return {
+        name: 'fcose',
+        quality: 'proof',
+        animate: animate !== false,
+        animationDuration: 400,
+        animationEasing: 'ease-out',
+        nodeDimensionsIncludeLabels: true,
+        nodeRepulsion: () => 8000,
+        idealEdgeLength: () => 150,
+        edgeElasticity: () => 0.1,
+        gravity: 0.25,
+        gravityRange: 3.8,
+        numIter: 2500,
+        tilingPaddingVertical: 30,
+        tilingPaddingHorizontal: 30,
+        fit: true,
+        padding: 50,
+        stop: () => { savePositions(); },
+      };
+    }
+
+    function runLayout() {
+      if (!cy) return;
+      cy.layout(getLayoutConfig(true)).run();
+    }
+
+    function toggleDeadFilter() {
+      deadFilterActive = !deadFilterActive;
+      const btn = document.getElementById('deadFilter');
+      btn.classList.toggle('active-warn', deadFilterActive);
+      btn.textContent = deadFilterActive ? 'Show all services' : 'Show dead services';
+      applyDeadFilter();
+    }
+
+    function applyDeadFilter() {
+      if (!cy) return;
+      cy.elements().removeClass('dimmed highlighted');
+      if (!deadFilterActive) return;
+
+      cy.nodes().forEach(node => {
+        const s = nodeStats.get(node.id());
+        const isDead = !s || s.last_traffic === 0;
+        if (!isDead) {
+          node.addClass('dimmed');
+        } else {
+          node.removeClass('dimmed');
+        }
+      });
+      cy.edges().forEach(edge => {
+        const src = edge.source();
+        const tgt = edge.target();
+        const srcDead = src.hasClass('dimmed');
+        const tgtDead = tgt.hasClass('dimmed');
+        if (srcDead && tgtDead) {
+          edge.addClass('dimmed');
+        } else if (!srcDead && !tgtDead) {
+          edge.removeClass('dimmed');
+        } else {
+          edge.addClass('dimmed');
+        }
+      });
+    }
+
+    function startPulse() {
+      if (pulseRAF) return;
+      function tick(ts) {
+        if (!cy) { pulseRAF = null; return; }
+        // Sine wave: 2s period, subtle opacity pulse only (width carries traffic volume info)
+        const t = (Math.sin(ts / 1000 * Math.PI) + 1) / 2;
+        cy.edges('.traffic-active').forEach(edge => {
+          const base = edge.data('baseWidth') || 2;
+          edge.style({ 'width': base, 'line-opacity': 0.7 + t * 0.3 });
+        });
+        pulseRAF = requestAnimationFrame(tick);
+      }
+      pulseRAF = requestAnimationFrame(tick);
+    }
+
+    function timeAgo(epoch) {
+      if (!epoch) return 'never';
+      const diff = Math.floor(Date.now() / 1000) - epoch;
+      if (diff < 60) return diff + 's ago';
+      if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+      if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+      return Math.floor(diff / 86400) + 'd ago';
+    }
+
+    function fetchStats() {
+      fetch('/api/stats').then(r => r.json()).then(stats => {
+        if (!stats) return;
+        nodeStats.clear();
+        for (const s of stats) {
+          nodeStats.set(s.node_id, s);
+        }
+        applyStats();
+      }).catch(() => {});
+    }
+
+    function applyStats() {
+      if (!cy) return;
+      cy.nodes().forEach(node => {
+        const s = nodeStats.get(node.id());
+        if (s && s.last_traffic === 0) {
+          node.addClass('never-active');
+        } else {
+          node.removeClass('never-active');
+        }
+      });
+      if (deadFilterActive) applyDeadFilter();
+    }
+
+    function buildGraph(graph) {
+      // Skip full rebuild if structure hasn't changed.
+      const fp = graphFingerprint(graph);
+      if (fp === lastGraphFingerprint && cy) return;
+      lastGraphFingerprint = fp;
+
+      const elements = [];
+      for (const n of (graph.nodes || [])) {
+        elements.push({ data: {
+          id: n.id, label: n.name, kind: n.kind, namespace: n.namespace,
+          purpose: n.purpose || '', fullLabel: n.display_name,
+        }});
+      }
+      for (let i = 0; i < (graph.edges || []).length; i++) {
+        const e = graph.edges[i];
+        elements.push({ data: {
+          id: 'e' + i, source: e.from, target: e.to,
+          kind: e.kind, detail: e.detail || '',
+          fullLabel: e.detail ? e.kind + ': ' + e.detail : e.kind,
+          connCount: 0,
+        }});
+      }
+
+      if (pulseRAF) { cancelAnimationFrame(pulseRAF); pulseRAF = null; }
+      if (cy) {
+        savePositions();
+        cy.destroy();
+      }
+
+      // Use saved positions if available (from previous session or auto-arrange off).
+      const nodeIds = new Set((graph.nodes || []).map(n => n.id));
+      const allHavePositions = savedPositions.size > 0 &&
+        [...nodeIds].every(id => savedPositions.has(id));
+
+      let layoutCfg;
+      if (!autoArrange || allHavePositions) {
+        for (const el of elements) {
+          if (el.data && !el.data.source && savedPositions.has(el.data.id)) {
+            el.position = savedPositions.get(el.data.id);
+          }
+        }
+        layoutCfg = { name: 'preset', fit: true, padding: 50 };
+      } else {
+        layoutCfg = getLayoutConfig(false); // no animation on initial build
+      }
+
+      cy = cytoscape({
+        container: document.getElementById('cy'),
+        elements,
+        wheelSensitivity: 0.3,
+        style: STYLES,
+        layout: layoutCfg,
+      });
+
+      // Click to highlight
+      cy.on('tap', 'node', function(evt) {
+        const node = evt.target;
+        const connected = node.connectedEdges().connectedNodes().union(node);
+        cy.elements().addClass('dimmed').removeClass('highlighted');
+        connected.removeClass('dimmed').addClass('highlighted');
+        node.connectedEdges().removeClass('dimmed').addClass('highlighted');
+      });
+      cy.on('tap', function(evt) {
+        if (evt.target === cy) cy.elements().removeClass('dimmed highlighted');
+      });
+
+      // Tooltip
+      const tip = document.getElementById('tooltip');
+      cy.on('mouseover', 'node', function(evt) {
+        const node = evt.target;
+        const d = node.data();
+        let html = `<strong>${d.fullLabel}</strong><br>Kind: ${d.kind}`;
+        if (d.purpose) html += `<br>Purpose: ${d.purpose}`;
+        const s = nodeStats.get(node.id());
+        if (s) {
+          html += `<br>First seen: ${timeAgo(s.first_seen)}`;
+          html += `<br>Last traffic: ${s.last_traffic ? timeAgo(s.last_traffic) : '<span style="color:#f85149">never</span>'}`;
+          html += `<br>Lifetime connections: ${s.total_conns.toLocaleString()}`;
+        }
+
+        // Inbound/outbound traffic from connected edges.
+        const inbound = [];
+        const outbound = [];
+        node.connectedEdges().forEach(edge => {
+          const conn = edge.data('connCount') || 0;
+          const err = edge.data('errCount') || 0;
+          if (conn === 0 && err === 0) return;
+          const src = edge.source();
+          const tgt = edge.target();
+          if (tgt.id() === node.id()) {
+            inbound.push({ name: src.data('label'), conn, err });
+          } else {
+            outbound.push({ name: tgt.data('label'), conn, err });
+          }
+        });
+        inbound.sort((a, b) => b.conn - a.conn);
+        outbound.sort((a, b) => b.conn - a.conn);
+
+        if (inbound.length > 0) {
+          html += `<br><br><strong style="color:#39d353">Inbound</strong>`;
+          for (const t of inbound) {
+            html += `<br>&larr; ${t.name}: ${t.conn} conn`;
+            if (t.err > 0) html += ` <span style="color:#f85149">(${t.err} err)</span>`;
+          }
+        }
+        if (outbound.length > 0) {
+          html += `<br><br><strong style="color:#58a6ff">Outbound</strong>`;
+          for (const t of outbound) {
+            html += `<br>&rarr; ${t.name}: ${t.conn} conn`;
+            if (t.err > 0) html += ` <span style="color:#f85149">(${t.err} err)</span>`;
+          }
+        }
+
+        tip.innerHTML = html;
+        tip.style.display = 'block';
+      });
+      cy.on('mouseover', 'edge', function(evt) {
+        const d = evt.target.data();
+        let html = `<strong>${d.kind}</strong>`;
+        if (d.detail) html += `<br>${d.detail}`;
+        if (d.connCount > 0) html += `<br>Active connections: ${d.connCount}`;
+        if (d.errCount > 0) html += `<br><span style="color:#f85149">Errors: ${d.errCount} (SYN_SENT/CLOSE_WAIT)</span>`;
+        tip.innerHTML = html;
+        tip.style.display = 'block';
+      });
+      cy.on('mousemove', function(evt) {
+        if (tip.style.display === 'block') {
+          tip.style.left = evt.originalEvent.clientX + 12 + 'px';
+          tip.style.top = evt.originalEvent.clientY + 12 + 'px';
+        }
+      });
+      cy.on('mouseout', 'node, edge', () => { tip.style.display = 'none'; });
+
+      fetchStats();
+    }
+
+    function applyTraffic(snapshot) {
+      if (!cy || !snapshot || !snapshot.connections) return;
+
+      // Build lookups: "source\ttarget" → {conn, err}
+      const traffic = new Map();
+      for (const c of snapshot.connections) {
+        const key = c.source_workload + '\t' + c.target_service;
+        const prev = traffic.get(key) || { conn: 0, err: 0 };
+        prev.conn += c.conn_count;
+        prev.err += (c.error_count || 0);
+        traffic.set(key, prev);
+      }
+
+      // Find max connection count for proportional scaling.
+      let maxConn = 1;
+      cy.edges().forEach(edge => {
+        const src = edge.data('source');
+        const tgt = edge.data('target');
+        const fwd = traffic.get(src + '\t' + tgt);
+        const rev = traffic.get(tgt + '\t' + src);
+        const c = (fwd || rev || { conn: 0 }).conn;
+        if (c > maxConn) maxConn = c;
+      });
+      const logMax = Math.log(1 + maxConn);
+
+      cy.edges().forEach(edge => {
+        const src = edge.data('source');
+        const tgt = edge.data('target');
+        const fwd = traffic.get(src + '\t' + tgt);
+        const rev = traffic.get(tgt + '\t' + src);
+        const counts = fwd || rev || { conn: 0, err: 0 };
+
+        edge.data('connCount', counts.conn);
+        edge.data('errCount', counts.err);
+        edge.removeClass('traffic-active traffic-idle traffic-error');
+
+        if (counts.err > 0) {
+          const ratio = logMax > 0 ? Math.log(1 + counts.err) / logMax : 0.5;
+          const width = 1.5 + ratio * 5;        // 1.5px → 6.5px
+          const opacity = 0.6 + ratio * 0.4;
+          edge.data('baseWidth', width);
+          edge.addClass('traffic-error');
+          edge.style({
+            'line-color': '#f85149',
+            'target-arrow-color': '#f85149',
+            'mid-target-arrow-color': '#f85149',
+            'width': width,
+            'line-opacity': opacity,
+          });
+        } else if (counts.conn > 0) {
+          const ratio = logMax > 0 ? Math.log(1 + counts.conn) / logMax : 0.5;
+          const width = 1.5 + ratio * 5;        // 1.5px → 6.5px
+          const opacity = 0.5 + ratio * 0.5;    // 0.5 → 1.0
+          edge.data('baseWidth', width);
+          edge.addClass('traffic-active');
+          edge.style({ 'width': width, 'line-opacity': opacity });
+          edge.removeStyle('line-color target-arrow-color mid-target-arrow-color');
+        } else {
+          edge.data('baseWidth', 1);
+          edge.addClass('traffic-idle');
+          edge.removeStyle('line-color target-arrow-color mid-target-arrow-color width line-opacity');
+        }
+      });
+      startPulse();
+    }
+
+    // Load saved positions, then connect SSE.
+    const statusEl = document.getElementById('status');
+    let pendingGraph = null;
+
+    loadPositions().then(() => {
+      // If a graph arrived while loading positions, build it now.
+      if (pendingGraph) {
+        buildGraph(pendingGraph);
+        pendingGraph = null;
+      }
+    });
+
+    const evtSource = new EventSource('/api/events');
+
+    evtSource.addEventListener('graph', function(e) {
+      const graph = JSON.parse(e.data);
+      if (!positionsLoaded && savedPositions.size === 0) {
+        // Positions still loading, queue the graph.
+        pendingGraph = graph;
+        // But if this is the first graph and no saved positions exist, build immediately.
+        setTimeout(() => {
+          if (pendingGraph) { buildGraph(pendingGraph); pendingGraph = null; }
+        }, 500);
+        return;
+      }
+      buildGraph(graph);
+    });
+
+    evtSource.addEventListener('traffic', function(e) {
+      applyTraffic(JSON.parse(e.data));
+      fetchStats();
+    });
+
+    evtSource.onopen = () => {
+      statusEl.textContent = 'live';
+      statusEl.style.color = '#39d353';
+    };
+
+    evtSource.onerror = () => {
+      statusEl.textContent = 'reconnecting...';
+      statusEl.style.color = '#d29922';
+    };
+
+    // Save positions on page unload.
+    window.addEventListener('beforeunload', () => {
+      savePositions();
+      persistPositions();
+    });
+  </script>
+</body>
+</html>
