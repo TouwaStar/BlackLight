@@ -1,0 +1,14 @@
+blacklight
+servicemap
+*.db
+*.db-journal
+*.db-wal
+.blacklight.yaml
+.git
+.gitignore
+.claude/
+.DS_Store
+deploy/
+README.md
+LICENSE
+Makefile

@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blacklight
+  namespace: blacklight
+  labels:
+    app.kubernetes.io/name: blacklight
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: blacklight
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: blacklight
+    spec:
+      serviceAccountName: blacklight
+      containers:
+        - name: blacklight
+          image: ghcr.io/touwastar/blacklight:latest
+          args: ["-output", "web", "-port", "8080", "-data-dir", "/data"]
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 50m
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: data
+          emptyDir: {}
