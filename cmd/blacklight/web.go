@@ -6,17 +6,22 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/TouwaStar/BlackLight/pkg/discovery"
 	"github.com/TouwaStar/BlackLight/pkg/render"
 	"github.com/TouwaStar/BlackLight/pkg/store"
+	"github.com/gorilla/websocket"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 //go:embed static
@@ -272,9 +277,140 @@ func serveWeb(mgr *Manager, port int) error {
 		}
 	})
 
+	wsUpgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	http.HandleFunc("/api/exec", func(w http.ResponseWriter, r *http.Request) {
+		kind := r.URL.Query().Get("kind")
+		namespace := r.URL.Query().Get("namespace")
+		name := r.URL.Query().Get("name")
+		if kind == "" || namespace == "" || name == "" {
+			http.Error(w, "kind, namespace, and name required", http.StatusBadRequest)
+			return
+		}
+
+		d := mgr.Discoverer()
+		podName, container, err := findPodForWorkload(r.Context(), d.Clientset(), kind, namespace, name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+
+		ws, err := wsUpgrader.Upgrade(w, r, http.Header{
+			"X-Pod-Name":  {podName},
+			"X-Container": {container},
+		})
+		if err != nil {
+			log.Printf("websocket upgrade: %v", err)
+			return
+		}
+		defer ws.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		req := d.Clientset().CoreV1().RESTClient().Post().
+			Resource("pods").
+			Name(podName).
+			Namespace(namespace).
+			SubResource("exec").
+			VersionedParams(&corev1.PodExecOptions{
+				Container: container,
+				Command:   []string{"/bin/sh"},
+				Stdin:     true,
+				Stdout:    true,
+				Stderr:    true,
+				TTY:       true,
+			}, scheme.ParameterCodec)
+
+		executor, err := remotecommand.NewSPDYExecutor(d.RestConfig(), "POST", req.URL())
+		if err != nil {
+			ws.WriteMessage(websocket.TextMessage, []byte("exec error: "+err.Error()))
+			return
+		}
+
+		bridge := &wsBridge{
+			ws:     ws,
+			sizeCh: make(chan remotecommand.TerminalSize, 1),
+		}
+		bridge.stdinR, bridge.stdinW = io.Pipe()
+
+		// Read from WebSocket, write to exec stdin.
+		go bridge.readLoop(cancel)
+
+		// Stream exec stdout to WebSocket.
+		err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+			Stdin:             bridge.stdinR,
+			Stdout:            bridge,
+			Stderr:            bridge,
+			Tty:               true,
+			TerminalSizeQueue: bridge,
+		})
+		if err != nil {
+			ws.WriteMessage(websocket.TextMessage, []byte("\r\n[exec ended: "+err.Error()+"]\r\n"))
+		}
+	})
+
 	addr := ":" + strconv.Itoa(port)
 	fmt.Printf("Serving at http://localhost%s\n", addr)
 	return http.ListenAndServe(addr, nil)
+}
+
+// wsBridge bridges a WebSocket connection to a k8s remotecommand exec session.
+type wsBridge struct {
+	ws     *websocket.Conn
+	mu     sync.Mutex
+	sizeCh chan remotecommand.TerminalSize
+	stdinR *io.PipeReader
+	stdinW *io.PipeWriter
+}
+
+// Write sends exec stdout/stderr to the WebSocket client.
+func (b *wsBridge) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.ws.WriteMessage(websocket.TextMessage, p); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// Next implements remotecommand.TerminalSizeQueue.
+func (b *wsBridge) Next() *remotecommand.TerminalSize {
+	size, ok := <-b.sizeCh
+	if !ok {
+		return nil
+	}
+	return &size
+}
+
+// readLoop reads messages from the WebSocket and routes them to stdin or resize.
+func (b *wsBridge) readLoop(cancel context.CancelFunc) {
+	defer cancel()
+	defer b.stdinW.Close()
+	for {
+		_, msg, err := b.ws.ReadMessage()
+		if err != nil {
+			return
+		}
+		// Check for resize message: {"type":"resize","cols":80,"rows":24}
+		if len(msg) > 0 && msg[0] == '{' {
+			var resize struct {
+				Type string `json:"type"`
+				Cols uint16 `json:"cols"`
+				Rows uint16 `json:"rows"`
+			}
+			if json.Unmarshal(msg, &resize) == nil && resize.Type == "resize" {
+				select {
+				case b.sizeCh <- remotecommand.TerminalSize{Width: resize.Cols, Height: resize.Rows}:
+				default:
+				}
+				continue
+			}
+		}
+		if _, err := b.stdinW.Write(msg); err != nil {
+			return
+		}
+	}
 }
 
 // findPodForWorkload resolves a workload (Deployment, StatefulSet, etc.) to a running pod.

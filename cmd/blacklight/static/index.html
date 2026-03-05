@@ -8,6 +8,9 @@
   <script src="https://cdn.jsdelivr.net/npm/layout-base@2.0.1/layout-base.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/cose-base@2.2.0/cose-base.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/cytoscape-fcose@2.2.0/cytoscape-fcose.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; }
     body {
@@ -143,6 +146,18 @@
     .log-line-debug { color: #484f58; }
     .log-line-critical { color: #f85149; font-weight: 600; }
     .log-search-hit { background: #58a6ff33; color: #e6edf3; }
+    #termPanel {
+      display: none; flex-shrink: 0; height: 35vh;
+      background: #0d1117; border-top: 1px solid #30363d;
+      flex-direction: column;
+    }
+    #termHeader {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.3rem 0.75rem; background: #161b22;
+      border-bottom: 1px solid #30363d; flex-shrink: 0;
+    }
+    #termTitle { font-size: 0.75rem; color: #e6edf3; font-weight: 600; }
+    #termContainer { flex: 1; padding: 2px; }
   </style>
 </head>
 <body>
@@ -193,9 +208,19 @@
     </div>
     <pre id="logContent"></pre>
   </div>
+  <div id="termPanel">
+    <div id="termHeader">
+      <span id="termTitle"></span>
+      <div>
+        <button class="log-btn" onclick="closeShell()">Close</button>
+      </div>
+    </div>
+    <div id="termContainer"></div>
+  </div>
   <div id="tooltip"></div>
   <div id="contextMenu">
     <div class="ctx-item" onclick="logsFromMenu()">Logs</div>
+    <div class="ctx-item" onclick="shellFromMenu()">Shell</div>
   </div>
 
   <script>
@@ -967,6 +992,101 @@
     function clearLogs() {
       logLines = [];
       logContent.innerHTML = '';
+    }
+
+    // --- Shell (terminal) panel ---
+    const termPanel = document.getElementById('termPanel');
+    const termTitle = document.getElementById('termTitle');
+    const termContainer = document.getElementById('termContainer');
+    let termWS = null;
+    let termInstance = null;
+    let termFit = null;
+
+    function shellFromMenu() {
+      if (!ctxNode) return;
+      const d = ctxNode.data();
+      openShell(d.kind, d.namespace, d.label);
+      hideContextMenu();
+    }
+
+    function openShell(kind, namespace, name) {
+      closeShell();
+      closeLogs();
+
+      termTitle.textContent = 'Shell: ' + namespace + '/' + name;
+      termPanel.style.display = 'flex';
+      if (cy) cy.resize();
+
+      termInstance = new Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: "'JetBrains Mono', 'SF Mono', Consolas, monospace",
+        theme: {
+          background: '#0d1117',
+          foreground: '#e6edf3',
+          cursor: '#58a6ff',
+          selectionBackground: '#388bfd44',
+          black: '#484f58', red: '#f85149', green: '#3fb950', yellow: '#d29922',
+          blue: '#58a6ff', magenta: '#a371f7', cyan: '#79c0ff', white: '#e6edf3',
+        },
+      });
+      termFit = new FitAddon.FitAddon();
+      termInstance.loadAddon(termFit);
+      termInstance.open(termContainer);
+      termFit.fit();
+
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const url = proto + '//' + location.host + '/api/exec?kind=' +
+        encodeURIComponent(kind) + '&namespace=' + encodeURIComponent(namespace) +
+        '&name=' + encodeURIComponent(name);
+
+      termWS = new WebSocket(url);
+      termWS.onopen = () => {
+        // Send initial size.
+        termWS.send(JSON.stringify({ type: 'resize', cols: termInstance.cols, rows: termInstance.rows }));
+      };
+      termWS.onmessage = (e) => {
+        termInstance.write(e.data);
+      };
+      termWS.onclose = () => {
+        termInstance.write('\r\n\x1b[90m[session ended]\x1b[0m\r\n');
+      };
+      termWS.onerror = () => {
+        termInstance.write('\r\n\x1b[31m[connection error]\x1b[0m\r\n');
+      };
+
+      // Send keystrokes to the pod.
+      termInstance.onData(data => {
+        if (termWS && termWS.readyState === WebSocket.OPEN) {
+          termWS.send(data);
+        }
+      });
+
+      // Handle terminal resize.
+      termInstance.onResize(({ cols, rows }) => {
+        if (termWS && termWS.readyState === WebSocket.OPEN) {
+          termWS.send(JSON.stringify({ type: 'resize', cols, rows }));
+        }
+      });
+
+      // Re-fit when window resizes.
+      window.addEventListener('resize', fitTerminal);
+    }
+
+    function fitTerminal() {
+      if (termFit && termPanel.style.display === 'flex') {
+        termFit.fit();
+      }
+    }
+
+    function closeShell() {
+      window.removeEventListener('resize', fitTerminal);
+      if (termWS) { termWS.close(); termWS = null; }
+      if (termInstance) { termInstance.dispose(); termInstance = null; }
+      termFit = null;
+      termContainer.innerHTML = '';
+      termPanel.style.display = 'none';
+      if (cy) cy.resize();
     }
 
     // --- Config selectors (context + namespace) ---
