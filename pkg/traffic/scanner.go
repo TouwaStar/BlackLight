@@ -22,13 +22,29 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
+const (
+	// ExecTimeout is the per-pod timeout for reading /proc/net/tcp.
+	ExecTimeout = 5 * time.Second
+	// ExecCooldown is how long a pod is skipped after a failed exec.
+	ExecCooldown = 2 * time.Minute
+	// MaxExecWorkers is the max concurrent pod exec calls.
+	MaxExecWorkers = 20
+	// MaxDNSWorkers is the max concurrent reverse DNS lookups.
+	MaxDNSWorkers = 20
+	// DNSTimeout is the per-IP timeout for reverse DNS lookups.
+	DNSTimeout = time.Second
+	// PartialResultDelay is how long the exec phase must run before emitting partial results.
+	PartialResultDelay = 3 * time.Second
+)
+
 // Scanner reads /proc/net/tcp from pods to discover live TCP connections.
 type Scanner struct {
 	clientset  *kubernetes.Clientset
 	restConfig *rest.Config
 	namespace  string
 
-	dnsCache sync.Map // IP string → bool (isCloud), persists across scans
+	dnsCache   sync.Map // IP string → bool (isCloud), persists across scans
+	failedPods sync.Map // pod name → time.Time (skip exec until this time)
 }
 
 func NewScanner(clientset *kubernetes.Clientset, restConfig *rest.Config, namespace string) *Scanner {
@@ -43,6 +59,13 @@ type podRef struct {
 
 // Scan runs one full traffic scan across all workloads.
 func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
+	return s.ScanWithProgress(ctx, nil)
+}
+
+// ScanWithProgress runs a traffic scan, calling onProgress with partial results
+// as pods respond (at most once per second). Returns the final complete snapshot.
+func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.TrafficSnapshot)) (*model.TrafficSnapshot, error) {
+	scanStart := time.Now()
 	nsList, err := s.listNamespaces(ctx)
 	if err != nil {
 		return nil, err
@@ -51,7 +74,6 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 	for _, ns := range nsList {
 		scanSet[ns] = true
 	}
-
 	// Build IP lookup tables.
 	serviceClusterIPs := make(map[string]string) // ClusterIP → node ID
 	podIPs := make(map[string]string)            // PodIP → workload node ID
@@ -92,7 +114,7 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 			continue
 		}
 		knownIPs[pod.Status.PodIP] = true
-		ownerKind, ownerName := workloadOwnerFromPod(pod)
+		ownerKind, ownerName := WorkloadOwnerFromPod(pod)
 		if ownerKind == "" {
 			continue
 		}
@@ -102,12 +124,11 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 		// Only track pods in scanned namespaces for exec.
 		if scanSet[ns] {
 			if _, exists := workloadPods[wid]; !exists {
-				cn := pickRunningContainer(pod)
+				cn := PickRunningContainer(pod)
 				workloadPods[wid] = podRef{namespace: ns, name: pod.Name, container: cn}
 			}
 		}
 	}
-
 	// Exec into one pod per workload and parse connections (parallel).
 	type connKey struct{ source, target string }
 	type extKey struct{ wid, ip string }
@@ -118,19 +139,27 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 	}
 
 	// Fan out exec calls with bounded concurrency.
-	const maxWorkers = 10
+	const maxWorkers = MaxExecWorkers
 	resultCh := make(chan podResult, len(workloadPods))
 	sem := make(chan struct{}, maxWorkers)
 	var wg sync.WaitGroup
 
+	execNow := time.Now()
 	for wid, pr := range workloadPods {
+		// Skip pods that recently failed exec (2-minute cooldown).
+		if expiry, ok := s.failedPods.Load(pr.name); ok {
+			if t, valid := expiry.(time.Time); valid && execNow.Before(t) {
+				continue
+			}
+			s.failedPods.Delete(pr.name)
+		}
 		wg.Add(1)
 		go func(wid string, pr podRef) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			execCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			execCtx, cancel := context.WithTimeout(ctx, ExecTimeout)
 			raw, err := s.execReadTCP(execCtx, pr.namespace, pr.name, pr.container)
 			cancel()
 			if err != nil {
@@ -138,18 +167,24 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 					!strings.Contains(err.Error(), "container not found") {
 					log.Printf("traffic: skip %s: %v", pr.name, err)
 				}
+				s.failedPods.Store(pr.name, time.Now().Add(ExecCooldown))
 				return
 			}
 			resultCh <- podResult{wid: wid, entries: parseProcNetTCP(raw)}
 		}(wid, pr)
 	}
-	wg.Wait()
-	close(resultCh)
 
-	// Aggregate results.
+	// Close channel when all workers finish; process results as they arrive.
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	// Aggregate results progressively.
 	connCounts := make(map[connKey]int)
 	errCounts := make(map[connKey]int)
 	extPerIP := make(map[extKey]int)
+	lastNotify := time.Time{}
 
 	for res := range resultCh {
 		for _, e := range res.entries {
@@ -171,6 +206,29 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 				extPerIP[extKey{res.wid, remoteIP}]++
 			}
 		}
+
+		// Emit partial results only if exec is taking a while (>3s). For fast scans,
+		// partials cause visual flicker as edges toggle active→idle→active.
+		if onProgress != nil && time.Since(execNow) > PartialResultDelay && time.Since(lastNotify) > time.Second {
+			partial := &model.TrafficSnapshot{Timestamp: time.Now().UnixMilli()}
+			pKeys := make(map[connKey]bool)
+			for k := range connCounts {
+				pKeys[k] = true
+			}
+			for k := range errCounts {
+				pKeys[k] = true
+			}
+			for key := range pKeys {
+				partial.Connections = append(partial.Connections, model.TrafficConnection{
+					SourceWorkload: key.source,
+					TargetService:  key.target,
+					ConnCount:      connCounts[key],
+					ErrorCount:     errCounts[key],
+				})
+			}
+			onProgress(partial)
+			lastNotify = time.Now()
+		}
 	}
 
 	snap := &model.TrafficSnapshot{Timestamp: time.Now().UnixMilli()}
@@ -191,12 +249,29 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 		})
 	}
 	// Classify external IPs as cloud infra or truly external via cached reverse DNS.
+	// Parallelize lookups — sequential DNS for 300+ IPs takes minutes.
 	cloudIPs := make(map[string]bool)
+	uniqueIPs := make(map[string]bool, len(extPerIP))
 	for ek := range extPerIP {
-		if s.isCloudIPCached(ek.ip) {
-			cloudIPs[ek.ip] = true
-		}
+		uniqueIPs[ek.ip] = true
 	}
+	var dnsMu sync.Mutex
+	var dnsWg sync.WaitGroup
+	dnsSem := make(chan struct{}, MaxDNSWorkers)
+	for ip := range uniqueIPs {
+		dnsWg.Add(1)
+		go func(ip string) {
+			defer dnsWg.Done()
+			dnsSem <- struct{}{}
+			defer func() { <-dnsSem }()
+			if s.isCloudIPCached(ip) {
+				dnsMu.Lock()
+				cloudIPs[ip] = true
+				dnsMu.Unlock()
+			}
+		}(ip)
+	}
+	dnsWg.Wait()
 
 	// Aggregate per workload, splitting cloud vs external.
 	type ipBucket struct {
@@ -224,6 +299,7 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 			snap.Cloud = append(snap.Cloud, buildExtTraffic(wid, b.cloud))
 		}
 	}
+	log.Printf("traffic scan: %v (%d connections, %d workloads)", time.Since(scanStart), len(snap.Connections), len(workloadPods))
 	return snap, nil
 }
 
@@ -348,7 +424,10 @@ func (s *Scanner) isCloudIPCached(ip string) bool {
 		return val.(bool)
 	}
 	result := false
-	names, err := net.LookupAddr(ip)
+	resolver := &net.Resolver{}
+	ctx, cancel := context.WithTimeout(context.Background(), DNSTimeout)
+	defer cancel()
+	names, err := resolver.LookupAddr(ctx, ip)
 	if err == nil && len(names) > 0 {
 		host := strings.ToLower(names[0])
 		for _, suffix := range cloudDNSSuffixes {
@@ -389,9 +468,9 @@ func sortIPCounts(s []model.IPCount) {
 	sort.Slice(s, func(i, j int) bool { return s[i].Count > s[j].Count })
 }
 
-// pickRunningContainer returns the name of a running container in the pod.
+// PickRunningContainer returns the name of a running container in the pod.
 // Prefers containers that are actually running over the first spec entry.
-func pickRunningContainer(pod *corev1.Pod) string {
+func PickRunningContainer(pod *corev1.Pod) string {
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.Ready && cs.State.Running != nil {
 			return cs.Name
@@ -404,9 +483,9 @@ func pickRunningContainer(pod *corev1.Pod) string {
 	return ""
 }
 
-// workloadOwnerFromPod derives workload kind+name from pod owner references.
+// WorkloadOwnerFromPod derives workload kind+name from pod owner references.
 // Strips the RS hash suffix to get the Deployment name (avoids extra API calls).
-func workloadOwnerFromPod(pod *corev1.Pod) (string, string) {
+func WorkloadOwnerFromPod(pod *corev1.Pod) (string, string) {
 	for _, ref := range pod.OwnerReferences {
 		switch ref.Kind {
 		case "ReplicaSet":

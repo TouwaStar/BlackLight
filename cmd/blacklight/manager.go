@@ -18,7 +18,11 @@ type Event struct {
 	Data any
 }
 
-const trafficWindow = 5 * time.Minute
+const (
+	trafficWindow     = 5 * time.Minute
+	discoveryInterval = 30 * time.Second
+	trafficInterval   = 12 * time.Second
+)
 
 // Manager runs periodic discovery and traffic scanning in the background.
 type Manager struct {
@@ -98,14 +102,7 @@ func (m *Manager) Reconfigure(ctx context.Context, kubeContext, namespace string
 	m.traffic = nil
 	m.recentScans = nil
 	m.trafficEdges = make(map[string]model.Edge)
-	if m.store != nil {
-		if edges, err := m.store.LoadTrafficEdges(); err == nil {
-			for _, e := range edges {
-				m.trafficEdges[e.From+"\t"+e.To] = e
-			}
-		}
-		m.mergeTrafficEdgesLocked()
-	}
+	m.restoreTrafficEdgesLocked()
 	m.mu.Unlock()
 
 	if m.store != nil {
@@ -122,23 +119,30 @@ func (m *Manager) SetInitialGraph(g *model.Graph) {
 	m.mu.Lock()
 	m.graph = collapsed
 	m.idMap = idMap
-	// Restore traffic edges from previous runs.
-	if m.store != nil {
-		if edges, err := m.store.LoadTrafficEdges(); err == nil {
-			for _, e := range edges {
-				m.trafficEdges[e.From+"\t"+e.To] = e
-			}
-		} else {
-			log.Printf("store load traffic edges: %v", err)
-		}
-		m.mergeTrafficEdgesLocked()
-	}
+	m.restoreTrafficEdgesLocked()
 	m.mu.Unlock()
 	if m.store != nil {
 		if err := m.store.RecordNodes(collapsed.Nodes); err != nil {
 			log.Printf("store record initial nodes: %v", err)
 		}
 	}
+}
+
+// restoreTrafficEdgesLocked loads persisted traffic edges from the store and
+// merges them into the current graph. Must be called while holding m.mu.
+func (m *Manager) restoreTrafficEdgesLocked() {
+	if m.store == nil {
+		return
+	}
+	edges, err := m.store.LoadTrafficEdges()
+	if err != nil {
+		log.Printf("store load traffic edges: %v", err)
+		return
+	}
+	for _, e := range edges {
+		m.trafficEdges[e.From+"\t"+e.To] = e
+	}
+	m.mergeTrafficEdgesLocked()
 }
 
 func (m *Manager) Graph() *model.Graph {
@@ -187,7 +191,7 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) discoveryLoop(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(discoveryInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -228,59 +232,70 @@ func (m *Manager) discoveryLoop(ctx context.Context) {
 }
 
 func (m *Manager) trafficLoop(ctx context.Context) {
-	ticker := time.NewTicker(12 * time.Second)
+	ticker := time.NewTicker(trafficInterval)
 	defer ticker.Stop()
-	// Run first scan immediately, then on ticker.
-	first := make(chan struct{}, 1)
-	first <- struct{}{}
+
+	scan := func() {
+		m.mu.RLock()
+		idMap := m.idMap
+		m.mu.RUnlock()
+
+		// Broadcast partial results as pods respond so traffic appears quickly.
+		onProgress := func(partial *model.TrafficSnapshot) {
+			translated := translateTraffic(partial, idMap)
+			m.broadcast(Event{Type: "traffic", Data: translated})
+		}
+
+		snap, err := m.scanner.ScanWithProgress(ctx, onProgress)
+		if err != nil {
+			log.Printf("traffic scan: %v", err)
+			return
+		}
+		translated := translateTraffic(snap, idMap)
+
+		now := time.Now()
+		m.mu.Lock()
+		// Append new scan, evict old ones outside the window.
+		m.recentScans = append(m.recentScans, timedSnapshot{time: now, snap: translated})
+		cutoff := now.Add(-trafficWindow)
+		kept := 0
+		for _, ts := range m.recentScans {
+			if ts.time.After(cutoff) {
+				m.recentScans[kept] = ts
+				kept++
+			}
+		}
+		m.recentScans = m.recentScans[:kept]
+
+		merged := mergeSnapshots(m.recentScans)
+		m.traffic = merged
+		m.mu.Unlock()
+		if m.store != nil {
+			if err := m.store.RecordTraffic(translated); err != nil {
+				log.Printf("store record traffic: %v", err)
+			}
+		}
+		m.broadcast(Event{Type: "traffic", Data: merged})
+
+		// Add edges for traffic connections that have no graph edge.
+		if m.addTrafficEdges(merged) {
+			m.mu.RLock()
+			g := m.graph
+			m.mu.RUnlock()
+			m.broadcast(Event{Type: "graph", Data: g})
+			m.persistTrafficEdges()
+		}
+	}
+
+	// Run first scan immediately.
+	scan()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-first:
 		case <-ticker.C:
-			snap, err := m.scanner.Scan(ctx)
-			if err != nil {
-				log.Printf("traffic scan: %v", err)
-				continue
-			}
-			m.mu.RLock()
-			idMap := m.idMap
-			m.mu.RUnlock()
-			translated := translateTraffic(snap, idMap)
-
-			now := time.Now()
-			m.mu.Lock()
-			// Append new scan, evict old ones outside the window.
-			m.recentScans = append(m.recentScans, timedSnapshot{time: now, snap: translated})
-			cutoff := now.Add(-trafficWindow)
-			kept := 0
-			for _, ts := range m.recentScans {
-				if ts.time.After(cutoff) {
-					m.recentScans[kept] = ts
-					kept++
-				}
-			}
-			m.recentScans = m.recentScans[:kept]
-
-			merged := mergeSnapshots(m.recentScans)
-			m.traffic = merged
-			m.mu.Unlock()
-			if m.store != nil {
-				if err := m.store.RecordTraffic(translated); err != nil {
-					log.Printf("store record traffic: %v", err)
-				}
-			}
-			m.broadcast(Event{Type: "traffic", Data: merged})
-
-			// Add edges for traffic connections that have no graph edge.
-			if m.addTrafficEdges(merged) {
-				m.mu.RLock()
-				g := m.graph
-				m.mu.RUnlock()
-				m.broadcast(Event{Type: "graph", Data: g})
-				m.persistTrafficEdges()
-			}
+			scan()
 		}
 	}
 }

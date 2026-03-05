@@ -17,12 +17,20 @@ import (
 	"github.com/TouwaStar/BlackLight/pkg/discovery"
 	"github.com/TouwaStar/BlackLight/pkg/render"
 	"github.com/TouwaStar/BlackLight/pkg/store"
+	"github.com/TouwaStar/BlackLight/pkg/traffic"
 	"github.com/gorilla/websocket"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
+)
+
+const (
+	defaultTailLines  = 100
+	searchTailLines   = 200
+	searchTimeout     = 30 * time.Second
+	searchConcurrency = 5
 )
 
 //go:embed static
@@ -232,14 +240,12 @@ func serveWeb(mgr *Manager, port int) error {
 			http.Error(w, "streaming not supported", http.StatusInternalServerError)
 			return
 		}
-		kind := r.URL.Query().Get("kind")
-		namespace := r.URL.Query().Get("namespace")
-		name := r.URL.Query().Get("name")
-		if kind == "" || namespace == "" || name == "" {
-			http.Error(w, "kind, namespace, and name required", http.StatusBadRequest)
+		kind, namespace, name, err := workloadParams(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		tailLines := int64(100)
+		tailLines := int64(defaultTailLines)
 		if t := r.URL.Query().Get("tail"); t != "" {
 			if v, err := strconv.ParseInt(t, 10, 64); err == nil && v > 0 {
 				tailLines = v
@@ -281,11 +287,9 @@ func serveWeb(mgr *Manager, port int) error {
 	wsUpgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 	http.HandleFunc("/api/exec", func(w http.ResponseWriter, r *http.Request) {
-		kind := r.URL.Query().Get("kind")
-		namespace := r.URL.Query().Get("namespace")
-		name := r.URL.Query().Get("name")
-		if kind == "" || namespace == "" || name == "" {
-			http.Error(w, "kind, namespace, and name required", http.StatusBadRequest)
+		kind, namespace, name, err := workloadParams(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -352,11 +356,9 @@ func serveWeb(mgr *Manager, port int) error {
 	})
 
 	http.HandleFunc("/api/describe", func(w http.ResponseWriter, r *http.Request) {
-		kind := r.URL.Query().Get("kind")
-		namespace := r.URL.Query().Get("namespace")
-		name := r.URL.Query().Get("name")
-		if kind == "" || namespace == "" || name == "" {
-			http.Error(w, "kind, namespace, and name required", http.StatusBadRequest)
+		kind, namespace, name, err := workloadParams(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		d := mgr.Discoverer()
@@ -375,7 +377,7 @@ func serveWeb(mgr *Manager, port int) error {
 			http.Error(w, "q parameter required", http.StatusBadRequest)
 			return
 		}
-		tailLines := int64(200)
+		tailLines := int64(searchTailLines)
 		if t := r.URL.Query().Get("tail"); t != "" {
 			if v, err := strconv.ParseInt(t, 10, 64); err == nil && v > 0 {
 				tailLines = v
@@ -389,7 +391,7 @@ func serveWeb(mgr *Manager, port int) error {
 		}
 
 		// 30-second timeout so slow pods don't hang the request.
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), searchTimeout)
 		defer cancel()
 
 		d := mgr.Discoverer()
@@ -428,7 +430,7 @@ func serveWeb(mgr *Manager, port int) error {
 		targets := make(map[string]podTarget) // nodeID → podTarget
 		for i := range allPods.Items {
 			pod := &allPods.Items[i]
-			ownerKind, ownerName := ownerFromPodRefs(pod)
+			ownerKind, ownerName := traffic.WorkloadOwnerFromPod(pod)
 			if ownerKind == "" {
 				continue
 			}
@@ -439,16 +441,7 @@ func serveWeb(mgr *Manager, port int) error {
 			if _, have := targets[nodeID]; have {
 				continue // already picked a pod for this workload
 			}
-			container := ""
-			for _, cs := range pod.Status.ContainerStatuses {
-				if cs.Ready && cs.State.Running != nil {
-					container = cs.Name
-					break
-				}
-			}
-			if container == "" && len(pod.Spec.Containers) > 0 {
-				container = pod.Spec.Containers[0].Name
-			}
+			container := traffic.PickRunningContainer(pod)
 			targets[nodeID] = podTarget{
 				nodeID:    nodeID,
 				namespace: pod.Namespace,
@@ -468,7 +461,7 @@ func serveWeb(mgr *Manager, port int) error {
 		)
 
 		// Limit concurrency to avoid overwhelming the API server.
-		sem := make(chan struct{}, 5)
+		sem := make(chan struct{}, searchConcurrency)
 		queryLower := strings.ToLower(query)
 
 		for _, pt := range targets {
@@ -573,26 +566,16 @@ func (b *wsBridge) readLoop(cancel context.CancelFunc) {
 	}
 }
 
-// ownerFromPodRefs derives workload kind+name from pod owner references.
-// Strips the ReplicaSet hash suffix to get the Deployment name.
-func ownerFromPodRefs(pod *corev1.Pod) (string, string) {
-	for _, ref := range pod.OwnerReferences {
-		switch ref.Kind {
-		case "ReplicaSet":
-			name := ref.Name
-			if idx := strings.LastIndex(name, "-"); idx > 0 {
-				name = name[:idx]
-			}
-			return "Deployment", name
-		case "StatefulSet":
-			return "StatefulSet", ref.Name
-		case "DaemonSet":
-			return "DaemonSet", ref.Name
-		case "Job":
-			return "Job", ref.Name
-		}
+
+// workloadParams extracts and validates kind/namespace/name query parameters.
+func workloadParams(r *http.Request) (kind, namespace, name string, err error) {
+	kind = r.URL.Query().Get("kind")
+	namespace = r.URL.Query().Get("namespace")
+	name = r.URL.Query().Get("name")
+	if kind == "" || namespace == "" || name == "" {
+		return "", "", "", fmt.Errorf("kind, namespace, and name required")
 	}
-	return "", ""
+	return kind, namespace, name, nil
 }
 
 // findPodForWorkload resolves a workload (Deployment, StatefulSet, etc.) to a running pod.

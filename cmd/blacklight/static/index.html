@@ -384,6 +384,8 @@
     let autoArrange = localStorage.getItem('bl-autoArrange') !== 'off';
     let savedPositions = new Map(); // node id → {x, y}
     let lastGraphFingerprint = '';
+    let lastTrafficSnapshot = null;
+    let _edgeIdCounter = 10000;
     let positionsDirty = false;
     let positionsLoaded = false;
 
@@ -589,6 +591,43 @@
       if (fp === lastGraphFingerprint && cy) return;
       lastGraphFingerprint = fp;
 
+      // Incremental update: if only edges changed (same nodes), add/remove edges
+      // without destroying and recreating the entire graph. Avoids visual flash.
+      if (cy) {
+        const curNodeIds = new Set();
+        cy.nodes().forEach(n => curNodeIds.add(n.id()));
+        const newNodeIds = new Set((graph.nodes || []).map(n => n.id));
+        if (curNodeIds.size === newNodeIds.size && [...newNodeIds].every(id => curNodeIds.has(id))) {
+          const want = new Map();
+          for (const e of (graph.edges || [])) {
+            want.set(e.from + '\t' + e.to + '\t' + e.kind, e);
+          }
+          // Remove edges no longer in graph data.
+          cy.edges().forEach(edge => {
+            const k = edge.data('source') + '\t' + edge.data('target') + '\t' + edge.data('kind');
+            if (!want.has(k)) edge.remove();
+          });
+          // Add new edges from graph data.
+          const have = new Set();
+          cy.edges().forEach(edge => {
+            have.add(edge.data('source') + '\t' + edge.data('target') + '\t' + edge.data('kind'));
+          });
+          for (const [k, e] of want) {
+            if (!have.has(k)) {
+              cy.add({ data: {
+                id: 'e' + (_edgeIdCounter++),
+                source: e.from, target: e.to,
+                kind: e.kind, detail: e.detail || '',
+                fullLabel: e.detail ? e.kind + ': ' + e.detail : e.kind,
+                connCount: 0,
+              }});
+            }
+          }
+          if (lastTrafficSnapshot) applyTraffic(lastTrafficSnapshot);
+          return;
+        }
+      }
+
       const elements = [];
       for (const n of (graph.nodes || [])) {
         elements.push({ data: {
@@ -788,9 +827,11 @@
 
       fetchStats();
       if (searchQuery) onSearch(searchQuery);
+      if (lastTrafficSnapshot) setTimeout(() => applyTraffic(lastTrafficSnapshot), 0);
     }
 
     function applyTraffic(snapshot) {
+      lastTrafficSnapshot = snapshot;
       if (!cy || !snapshot || !snapshot.connections) return;
 
       // Build lookups: "source\ttarget" → {conn, err}
@@ -801,6 +842,29 @@
         prev.conn += c.conn_count;
         prev.err += (c.error_count || 0);
         traffic.set(key, prev);
+      }
+
+      // Create edges for traffic between nodes that have no graph edge yet.
+      // This makes traffic visible immediately without waiting for a graph rebuild.
+      const nodeIds = new Set();
+      cy.nodes().forEach(n => nodeIds.add(n.id()));
+      const edgeKeys = new Set();
+      cy.edges().forEach(edge => {
+        edgeKeys.add(edge.data('source') + '\t' + edge.data('target'));
+        edgeKeys.add(edge.data('target') + '\t' + edge.data('source'));
+      });
+      for (const [key] of traffic) {
+        const parts = key.split('\t');
+        if (nodeIds.has(parts[0]) && nodeIds.has(parts[1]) && !edgeKeys.has(key)) {
+          cy.add({ data: {
+            id: 'te' + (_edgeIdCounter++),
+            source: parts[0], target: parts[1],
+            kind: 'traffic', detail: 'observed',
+            fullLabel: 'traffic: observed',
+            connCount: 0,
+          }});
+          edgeKeys.add(key);
+        }
       }
 
       // Find max connection count for proportional scaling.
