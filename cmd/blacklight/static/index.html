@@ -35,6 +35,14 @@
     a:hover { text-decoration: underline; }
     .hint { color: #484f58; font-size: 0.7rem; }
     #status { font-size: 0.7rem; font-weight: 600; }
+    #searchBox {
+      font-family: inherit; font-size: 0.7rem;
+      background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+      border-radius: 4px; padding: 0.25rem 0.5rem; width: 160px;
+      outline: none; transition: border-color 0.15s;
+    }
+    #searchBox:focus { border-color: #58a6ff; }
+    #searchBox::placeholder { color: #484f58; }
     .filter-btn {
       font-family: inherit; font-size: 0.7rem; font-weight: 600;
       background: transparent; color: #8b949e; border: 1px solid #30363d;
@@ -82,10 +90,12 @@
       <div class="legend-item"><span class="legend-dot" style="background:#58a6ff"></span> Service (standalone)</div>
       <div class="legend-item"><span class="legend-dot" style="background:#39d353;border-radius:50%"></span> Active traffic</div>
       <div class="legend-item"><span class="legend-dot" style="background:#f85149;border-radius:50%"></span> Connection errors</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#0d1117;border:2px solid #f0883e"></span> External traffic</div>
       <div class="legend-item"><span class="legend-dot" style="background:#484f58;border:1px dashed #8b949e"></span> No traffic observed</div>
     </div>
     <div class="controls">
       <span id="status" style="color:#d29922">connecting...</span>
+      <input id="searchBox" type="text" placeholder="Search services..." oninput="onSearch(this.value)">
       <button id="autoArrange" class="filter-btn active" onclick="toggleAutoArrange()">Auto arrange: ON</button>
       <button id="deadFilter" class="filter-btn" onclick="toggleDeadFilter()">Show dead services</button>
       <span class="hint">scroll to zoom &middot; drag to pan &middot; click node to highlight</span>
@@ -183,6 +193,13 @@
       },
       { selector: '.dimmed', style: { 'opacity': 0.15 } },
       {
+        selector: '.external-traffic',
+        style: {
+          'border-width': 3, 'border-color': '#f0883e',
+          'border-opacity': 0.9,
+        }
+      },
+      {
         selector: '.never-active',
         style: {
           'background-opacity': 0.4, 'border-style': 'dashed',
@@ -195,7 +212,7 @@
     let nodeStats = new Map(); // node_id → {first_seen, last_traffic, total_conns}
     let pulseRAF = null;
     let deadFilterActive = false;
-    let autoArrange = true;
+    let autoArrange = localStorage.getItem('bl-autoArrange') !== 'off';
     let savedPositions = new Map(); // node id → {x, y}
     let lastGraphFingerprint = '';
     let positionsDirty = false;
@@ -209,10 +226,17 @@
 
     function toggleAutoArrange() {
       autoArrange = !autoArrange;
+      localStorage.setItem('bl-autoArrange', autoArrange ? 'on' : 'off');
       const btn = document.getElementById('autoArrange');
       btn.classList.toggle('active', autoArrange);
       btn.textContent = autoArrange ? 'Auto arrange: ON' : 'Auto arrange: OFF';
       if (autoArrange) runLayout();
+    }
+    // Initialize button to match restored state.
+    {
+      const btn = document.getElementById('autoArrange');
+      btn.classList.toggle('active', autoArrange);
+      btn.textContent = autoArrange ? 'Auto arrange: ON' : 'Auto arrange: OFF';
     }
 
     function savePositions() {
@@ -237,7 +261,7 @@
         body: JSON.stringify(arr),
       }).catch(() => {});
     }
-    setInterval(persistPositions, 10000); // save every 10s if dirty
+    setInterval(persistPositions, 3000); // save every 3s if dirty
 
     // Load positions from server on startup.
     function loadPositions() {
@@ -258,16 +282,16 @@
         animationDuration: 400,
         animationEasing: 'ease-out',
         nodeDimensionsIncludeLabels: true,
-        nodeRepulsion: () => 8000,
-        idealEdgeLength: () => 150,
-        edgeElasticity: () => 0.1,
-        gravity: 0.25,
-        gravityRange: 3.8,
-        numIter: 2500,
-        tilingPaddingVertical: 30,
-        tilingPaddingHorizontal: 30,
+        nodeRepulsion: () => 50000,
+        idealEdgeLength: () => 250,
+        edgeElasticity: () => 0.05,
+        gravity: 0.05,
+        gravityRange: 8,
+        numIter: 5000,
+        tilingPaddingVertical: 40,
+        tilingPaddingHorizontal: 40,
         fit: true,
-        padding: 50,
+        padding: 60,
         stop: () => { savePositions(); },
       };
     }
@@ -283,6 +307,29 @@
       btn.classList.toggle('active-warn', deadFilterActive);
       btn.textContent = deadFilterActive ? 'Show all services' : 'Show dead services';
       applyDeadFilter();
+    }
+
+    let searchQuery = '';
+
+    function onSearch(query) {
+      searchQuery = query.trim().toLowerCase();
+      if (!cy) return;
+      if (deadFilterActive) { deadFilterActive = false; document.getElementById('deadFilter').classList.remove('active-warn'); document.getElementById('deadFilter').textContent = 'Show dead services'; }
+      cy.elements().removeClass('dimmed highlighted');
+      if (!searchQuery) return;
+      const matched = cy.nodes().filter(n => {
+        const label = (n.data('label') || '').toLowerCase();
+        const full = (n.data('fullLabel') || '').toLowerCase();
+        const id = n.id().toLowerCase();
+        return label.includes(searchQuery) || full.includes(searchQuery) || id.includes(searchQuery);
+      });
+      if (matched.length === 0) { cy.elements().addClass('dimmed'); return; }
+      const connEdges = matched.connectedEdges();
+      const neighbors = connEdges.connectedNodes().union(matched);
+      cy.elements().addClass('dimmed');
+      neighbors.removeClass('dimmed');
+      matched.addClass('highlighted');
+      connEdges.removeClass('dimmed').addClass('highlighted');
     }
 
     function applyDeadFilter() {
@@ -391,21 +438,32 @@
         cy.destroy();
       }
 
-      // Use saved positions if available (from previous session or auto-arrange off).
+      // Use saved positions if available (from previous session or manual drag).
       const nodeIds = new Set((graph.nodes || []).map(n => n.id));
-      const allHavePositions = savedPositions.size > 0 &&
-        [...nodeIds].every(id => savedPositions.has(id));
+      let hasSome = false;
+      let missingPositions = false;
+      for (const el of elements) {
+        if (el.data && !el.data.source && savedPositions.has(el.data.id)) {
+          el.position = savedPositions.get(el.data.id);
+          hasSome = true;
+        } else if (el.data && !el.data.source) {
+          missingPositions = true;
+        }
+      }
 
       let layoutCfg;
-      if (!autoArrange || allHavePositions) {
-        for (const el of elements) {
-          if (el.data && !el.data.source && savedPositions.has(el.data.id)) {
-            el.position = savedPositions.get(el.data.id);
-          }
-        }
+      if (hasSome && !missingPositions) {
+        // All nodes have saved positions — use them directly.
         layoutCfg = { name: 'preset', fit: true, padding: 50 };
+      } else if (hasSome && !autoArrange) {
+        // Some positions saved, auto-arrange off — use preset, new nodes get default (0,0) position.
+        layoutCfg = { name: 'preset', fit: true, padding: 50 };
+      } else if (hasSome && autoArrange) {
+        // Some positions saved but new nodes appeared — re-layout to place them.
+        layoutCfg = getLayoutConfig(false);
       } else {
-        layoutCfg = getLayoutConfig(false); // no animation on initial build
+        // No saved positions at all — run full layout.
+        layoutCfg = getLayoutConfig(false);
       }
 
       cy = cytoscape({
@@ -416,6 +474,9 @@
         layout: layoutCfg,
       });
 
+      // Save position when a node is dragged.
+      cy.on('dragfree', 'node', function() { savePositions(); });
+
       // Click to highlight
       cy.on('tap', 'node', function(evt) {
         const node = evt.target;
@@ -425,7 +486,10 @@
         node.connectedEdges().removeClass('dimmed').addClass('highlighted');
       });
       cy.on('tap', function(evt) {
-        if (evt.target === cy) cy.elements().removeClass('dimmed highlighted');
+        if (evt.target === cy) {
+          cy.elements().removeClass('dimmed highlighted');
+          if (searchQuery) { document.getElementById('searchBox').value = ''; searchQuery = ''; }
+        }
       });
 
       // Tooltip
@@ -440,6 +504,11 @@
           html += `<br>First seen: ${timeAgo(s.first_seen)}`;
           html += `<br>Last traffic: ${s.last_traffic ? timeAgo(s.last_traffic) : '<span style="color:#f85149">never</span>'}`;
           html += `<br>Lifetime connections: ${s.total_conns.toLocaleString()}`;
+        }
+
+        const extConns = node.data('externalConns') || 0;
+        if (extConns > 0) {
+          html += `<br><strong style="color:#f0883e">External traffic: ${extConns} conn</strong>`;
         }
 
         // Inbound/outbound traffic from connected edges.
@@ -496,6 +565,7 @@
       cy.on('mouseout', 'node, edge', () => { tip.style.display = 'none'; });
 
       fetchStats();
+      if (searchQuery) onSearch(searchQuery);
     }
 
     function applyTraffic(snapshot) {
@@ -561,6 +631,23 @@
           edge.removeStyle('line-color target-arrow-color mid-target-arrow-color width line-opacity');
         }
       });
+
+      // Mark nodes receiving external (non-cluster) traffic.
+      const extMap = new Map();
+      for (const ext of (snapshot.external || [])) {
+        extMap.set(ext.node_id, ext.conn_count);
+      }
+      cy.nodes().forEach(node => {
+        const extConns = extMap.get(node.id());
+        if (extConns && extConns > 0) {
+          node.data('externalConns', extConns);
+          node.addClass('external-traffic');
+        } else {
+          node.data('externalConns', 0);
+          node.removeClass('external-traffic');
+        }
+      });
+
       startPulse();
     }
 

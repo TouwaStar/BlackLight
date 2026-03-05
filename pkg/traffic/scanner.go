@@ -79,10 +79,7 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 			wid := model.NodeID(ownerKind, ns, ownerName)
 			podIPs[pod.Status.PodIP] = wid
 			if _, exists := workloadPods[wid]; !exists {
-				cn := ""
-				if len(pod.Spec.Containers) > 0 {
-					cn = pod.Spec.Containers[0].Name
-				}
+				cn := pickRunningContainer(pod)
 				workloadPods[wid] = podRef{namespace: ns, name: pod.Name, container: cn}
 			}
 		}
@@ -92,11 +89,15 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 	type connKey struct{ source, target string }
 	connCounts := make(map[connKey]int)
 	errCounts := make(map[connKey]int)
+	externalCounts := make(map[string]int) // workload ID → external inbound conn count
 
 	for wid, pr := range workloadPods {
-		raw, err := s.execReadTCP(ctx, pr.namespace, pr.name, pr.container)
+		execCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		raw, err := s.execReadTCP(execCtx, pr.namespace, pr.name, pr.container)
+		cancel()
 		if err != nil {
-			if !strings.Contains(err.Error(), "executable file not found") {
+			if !strings.Contains(err.Error(), "executable file not found") &&
+				!strings.Contains(err.Error(), "container not found") {
 				log.Printf("traffic: skip %s: %v", pr.name, err)
 			}
 			continue
@@ -109,14 +110,16 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 			} else if tid, ok := podIPs[remoteIP]; ok && tid != wid {
 				targetID = tid
 			}
-			if targetID == "" {
-				continue
-			}
-			key := connKey{wid, targetID}
-			if e.IsError {
-				errCounts[key]++
-			} else {
-				connCounts[key]++
+			if targetID != "" {
+				key := connKey{wid, targetID}
+				if e.IsError {
+					errCounts[key]++
+				} else {
+					connCounts[key]++
+				}
+			} else if !e.IsError {
+				// Remote IP is not a known pod or service — external inbound traffic.
+				externalCounts[wid]++
 			}
 		}
 	}
@@ -136,6 +139,12 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 			TargetService:  key.target,
 			ConnCount:      connCounts[key],
 			ErrorCount:     errCounts[key],
+		})
+	}
+	for wid, count := range externalCounts {
+		snap.External = append(snap.External, model.ExternalTraffic{
+			NodeID:    wid,
+			ConnCount: count,
 		})
 	}
 	return snap, nil
@@ -246,6 +255,21 @@ func parseHexAddr(s string) (net.IP, uint16, bool) {
 		return nil, 0, false
 	}
 	return ip, uint16(port64), true
+}
+
+// pickRunningContainer returns the name of a running container in the pod.
+// Prefers containers that are actually running over the first spec entry.
+func pickRunningContainer(pod *corev1.Pod) string {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Ready && cs.State.Running != nil {
+			return cs.Name
+		}
+	}
+	// Fallback: first container from spec.
+	if len(pod.Spec.Containers) > 0 {
+		return pod.Spec.Containers[0].Name
+	}
+	return ""
 }
 
 // workloadOwnerFromPod derives workload kind+name from pod owner references.

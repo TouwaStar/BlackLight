@@ -332,9 +332,25 @@ func mergeSnapshots(scans []timedSnapshot) *model.TrafficSnapshot {
 			}
 		}
 	}
+	// Merge external traffic: take max per workload.
+	extAggr := make(map[string]int)
+	for _, ts := range scans {
+		if ts.snap == nil {
+			continue
+		}
+		for _, ext := range ts.snap.External {
+			if ext.ConnCount > extAggr[ext.NodeID] {
+				extAggr[ext.NodeID] = ext.ConnCount
+			}
+		}
+	}
+
 	result := &model.TrafficSnapshot{Timestamp: latest}
 	for _, c := range aggr {
 		result.Connections = append(result.Connections, *c)
+	}
+	for id, count := range extAggr {
+		result.External = append(result.External, model.ExternalTraffic{NodeID: id, ConnCount: count})
 	}
 	return result
 }
@@ -376,6 +392,14 @@ func translateTraffic(snap *model.TrafficSnapshot, idMap map[string]string) *mod
 	result := &model.TrafficSnapshot{Timestamp: snap.Timestamp}
 	for _, c := range aggr {
 		result.Connections = append(result.Connections, *c)
+	}
+	// Translate external traffic node IDs.
+	for _, ext := range snap.External {
+		id := ext.NodeID
+		if mapped, ok := idMap[id]; ok {
+			id = mapped
+		}
+		result.External = append(result.External, model.ExternalTraffic{NodeID: id, ConnCount: ext.ConnCount})
 	}
 	return result
 }

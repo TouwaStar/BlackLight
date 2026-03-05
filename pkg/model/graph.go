@@ -34,10 +34,17 @@ type TrafficConnection struct {
 	ErrorCount     int    `json:"error_count"` // SYN_SENT + CLOSE_WAIT connections
 }
 
+// ExternalTraffic records inbound connections from outside the cluster to a workload.
+type ExternalTraffic struct {
+	NodeID    string `json:"node_id"`    // workload node ID
+	ConnCount int    `json:"conn_count"` // number of external inbound connections
+}
+
 // TrafficSnapshot holds a point-in-time view of all observed TCP connections.
 type TrafficSnapshot struct {
 	Timestamp   int64               `json:"timestamp"` // unix millis
 	Connections []TrafficConnection `json:"connections"`
+	External    []ExternalTraffic   `json:"external,omitempty"` // workloads receiving external traffic
 }
 
 // GraphEqual returns true if two graphs have the same node IDs and edge keys.
