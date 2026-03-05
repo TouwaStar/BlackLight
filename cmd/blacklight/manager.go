@@ -169,10 +169,14 @@ func (m *Manager) discoveryLoop(ctx context.Context) {
 func (m *Manager) trafficLoop(ctx context.Context) {
 	ticker := time.NewTicker(12 * time.Second)
 	defer ticker.Stop()
+	// Run first scan immediately, then on ticker.
+	first := make(chan struct{}, 1)
+	first <- struct{}{}
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-first:
 		case <-ticker.C:
 			snap, err := m.scanner.Scan(ctx)
 			if err != nil {

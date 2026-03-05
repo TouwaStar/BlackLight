@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/TouwaStar/BlackLight/pkg/model"
@@ -26,6 +27,8 @@ type Scanner struct {
 	clientset  *kubernetes.Clientset
 	restConfig *rest.Config
 	namespace  string
+
+	dnsCache sync.Map // IP string → bool (isCloud), persists across scans
 }
 
 func NewScanner(clientset *kubernetes.Clientset, restConfig *rest.Config, namespace string) *Scanner {
@@ -117,42 +120,67 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 		}
 	}
 
-	// Exec into one pod per workload and parse connections.
+	// Exec into one pod per workload and parse connections (parallel).
 	type connKey struct{ source, target string }
-	connCounts := make(map[connKey]int)
-	errCounts := make(map[connKey]int)
 	type extKey struct{ wid, ip string }
-	extPerIP := make(map[extKey]int) // workload+IP → count
+
+	type podResult struct {
+		wid     string
+		entries []tcpEntry
+	}
+
+	// Fan out exec calls with bounded concurrency.
+	const maxWorkers = 10
+	resultCh := make(chan podResult, len(workloadPods))
+	sem := make(chan struct{}, maxWorkers)
+	var wg sync.WaitGroup
 
 	for wid, pr := range workloadPods {
-		execCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		raw, err := s.execReadTCP(execCtx, pr.namespace, pr.name, pr.container)
-		cancel()
-		if err != nil {
-			if !strings.Contains(err.Error(), "executable file not found") &&
-				!strings.Contains(err.Error(), "container not found") {
-				log.Printf("traffic: skip %s: %v", pr.name, err)
+		wg.Add(1)
+		go func(wid string, pr podRef) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			execCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			raw, err := s.execReadTCP(execCtx, pr.namespace, pr.name, pr.container)
+			cancel()
+			if err != nil {
+				if !strings.Contains(err.Error(), "executable file not found") &&
+					!strings.Contains(err.Error(), "container not found") {
+					log.Printf("traffic: skip %s: %v", pr.name, err)
+				}
+				return
 			}
-			continue
-		}
-		for _, e := range parseProcNetTCP(raw) {
+			resultCh <- podResult{wid: wid, entries: parseProcNetTCP(raw)}
+		}(wid, pr)
+	}
+	wg.Wait()
+	close(resultCh)
+
+	// Aggregate results.
+	connCounts := make(map[connKey]int)
+	errCounts := make(map[connKey]int)
+	extPerIP := make(map[extKey]int)
+
+	for res := range resultCh {
+		for _, e := range res.entries {
 			remoteIP := e.RemoteIP.String()
 			var targetID string
 			if tid, ok := serviceClusterIPs[remoteIP]; ok {
 				targetID = tid
-			} else if tid, ok := podIPs[remoteIP]; ok && tid != wid {
+			} else if tid, ok := podIPs[remoteIP]; ok && tid != res.wid {
 				targetID = tid
 			}
 			if targetID != "" {
-				key := connKey{wid, targetID}
+				key := connKey{res.wid, targetID}
 				if e.IsError {
 					errCounts[key]++
 				} else {
 					connCounts[key]++
 				}
 			} else if !e.IsError && !knownIPs[remoteIP] && !isPrivateIP(e.RemoteIP) {
-				// Remote IP is not any known cluster IP and not RFC 1918 — truly external.
-				extPerIP[extKey{wid, remoteIP}]++
+				extPerIP[extKey{res.wid, remoteIP}]++
 			}
 		}
 	}
@@ -174,15 +202,11 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 			ErrorCount:     errCounts[key],
 		})
 	}
-	// Classify external IPs as cloud infra or truly external via reverse DNS.
-	uniqueIPs := make(map[string]bool)
-	for ek := range extPerIP {
-		uniqueIPs[ek.ip] = true
-	}
+	// Classify external IPs as cloud infra or truly external via cached reverse DNS.
 	cloudIPs := make(map[string]bool)
-	for ip := range uniqueIPs {
-		if isCloudIP(ip) {
-			cloudIPs[ip] = true
+	for ek := range extPerIP {
+		if s.isCloudIPCached(ek.ip) {
+			cloudIPs[ek.ip] = true
 		}
 	}
 
@@ -330,19 +354,24 @@ func isPrivateIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsPrivate()
 }
 
-// isCloudIP checks reverse DNS to detect cloud provider infrastructure IPs.
-func isCloudIP(ip string) bool {
-	names, err := net.LookupAddr(ip)
-	if err != nil || len(names) == 0 {
-		return false
+// isCloudIPCached checks reverse DNS with caching to detect cloud provider IPs.
+func (s *Scanner) isCloudIPCached(ip string) bool {
+	if val, ok := s.dnsCache.Load(ip); ok {
+		return val.(bool)
 	}
-	host := strings.ToLower(names[0])
-	for _, suffix := range cloudDNSSuffixes {
-		if strings.Contains(host, suffix) {
-			return true
+	result := false
+	names, err := net.LookupAddr(ip)
+	if err == nil && len(names) > 0 {
+		host := strings.ToLower(names[0])
+		for _, suffix := range cloudDNSSuffixes {
+			if strings.Contains(host, suffix) {
+				result = true
+				break
+			}
 		}
 	}
-	return false
+	s.dnsCache.Store(ip, result)
+	return result
 }
 
 var cloudDNSSuffixes = []string{
