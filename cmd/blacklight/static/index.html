@@ -530,7 +530,12 @@
       return Math.floor(diff / 86400) + 'd ago';
     }
 
+    let _statsTimer = null;
     function fetchStats() {
+      // Debounce: stats don't change fast enough to justify fetching on every
+      // traffic event (every 12s). Coalesce rapid calls into one.
+      if (_statsTimer) return;
+      _statsTimer = setTimeout(() => { _statsTimer = null; }, 15000);
       fetch('/api/stats').then(r => r.json()).then(stats => {
         if (!stats) return;
         nodeStats.clear();

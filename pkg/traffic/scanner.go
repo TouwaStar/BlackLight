@@ -47,6 +47,10 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	scanSet := make(map[string]bool, len(nsList))
+	for _, ns := range nsList {
+		scanSet[ns] = true
+	}
 
 	// Build IP lookup tables.
 	serviceClusterIPs := make(map[string]string) // ClusterIP → node ID
@@ -64,58 +68,42 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 		}
 	}
 
-	// Collect services and pods across all namespaces (including system) for IP tracking.
-	allNamespaces, _ := s.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
-	allNsList := nsList
-	if allNamespaces != nil {
-		seen := make(map[string]bool)
-		for _, ns := range nsList {
-			seen[ns] = true
-		}
-		for i := range allNamespaces.Items {
-			ns := allNamespaces.Items[i].Name
-			if !seen[ns] {
-				allNsList = append(allNsList, ns)
+	// Single cluster-wide listing for services and pods (instead of per-namespace loops).
+	svcs, err := s.clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for i := range svcs.Items {
+			svc := &svcs.Items[i]
+			if svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
+				serviceClusterIPs[svc.Spec.ClusterIP] = model.NodeID("Service", svc.Namespace, svc.Name)
+				knownIPs[svc.Spec.ClusterIP] = true
 			}
 		}
 	}
 
-	for _, ns := range allNsList {
-		svcs, err := s.clientset.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
-		if err == nil {
-			for i := range svcs.Items {
-				svc := &svcs.Items[i]
-				if svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
-					serviceClusterIPs[svc.Spec.ClusterIP] = model.NodeID("Service", ns, svc.Name)
-					knownIPs[svc.Spec.ClusterIP] = true
-				}
-			}
-		}
-
-		pods, err := s.clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
-			FieldSelector: "status.phase=Running",
-		})
-		if err != nil {
+	allPods, err := s.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		FieldSelector: "status.phase=Running",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+	for i := range allPods.Items {
+		pod := &allPods.Items[i]
+		if pod.Status.PodIP == "" {
 			continue
 		}
-		for i := range pods.Items {
-			pod := &pods.Items[i]
-			if pod.Status.PodIP == "" {
-				continue
-			}
-			knownIPs[pod.Status.PodIP] = true
-			ownerKind, ownerName := workloadOwnerFromPod(pod)
-			if ownerKind == "" {
-				continue
-			}
-			wid := model.NodeID(ownerKind, ns, ownerName)
-			podIPs[pod.Status.PodIP] = wid
-			// Only track pods in scanned namespaces for exec.
-			if !systemNamespaces[ns] {
-				if _, exists := workloadPods[wid]; !exists {
-					cn := pickRunningContainer(pod)
-					workloadPods[wid] = podRef{namespace: ns, name: pod.Name, container: cn}
-				}
+		knownIPs[pod.Status.PodIP] = true
+		ownerKind, ownerName := workloadOwnerFromPod(pod)
+		if ownerKind == "" {
+			continue
+		}
+		ns := pod.Namespace
+		wid := model.NodeID(ownerKind, ns, ownerName)
+		podIPs[pod.Status.PodIP] = wid
+		// Only track pods in scanned namespaces for exec.
+		if scanSet[ns] {
+			if _, exists := workloadPods[wid]; !exists {
+				cn := pickRunningContainer(pod)
+				workloadPods[wid] = podRef{namespace: ns, name: pod.Name, container: cn}
 			}
 		}
 	}

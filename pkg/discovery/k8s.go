@@ -461,15 +461,35 @@ func (d *Discoverer) addEdgesFromPodEnv(ctx context.Context, g *model.Graph, nam
 	seenEdges := make(map[string]bool)
 	// Cache ConfigMap data per namespace to avoid repeated API calls.
 	cmCache := make(map[string]map[string]string) // "ns/name" → data
+	// Cache ReplicaSet owner references to avoid per-pod Get calls.
+	rsOwnerCache := make(map[string]ownerInfo) // "ns/rsName" → owner
 
 	for _, ns := range namespaces {
+		// Pre-fetch ReplicaSets for this namespace to avoid N individual Get calls.
+		rsList, err := d.clientset.AppsV1().ReplicaSets(ns).List(ctx, metav1.ListOptions{})
+		if err == nil {
+			for i := range rsList.Items {
+				rs := &rsList.Items[i]
+				key := ns + "/" + rs.Name
+				for _, o := range rs.OwnerReferences {
+					if o.Kind == "Deployment" {
+						rsOwnerCache[key] = ownerInfo{kind: "Deployment", name: o.Name}
+						break
+					}
+				}
+				if _, ok := rsOwnerCache[key]; !ok {
+					rsOwnerCache[key] = ownerInfo{kind: "ReplicaSet", name: rs.Name}
+				}
+			}
+		}
+
 		pods, err := d.clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			continue
 		}
 		for i := range pods.Items {
 			pod := &pods.Items[i]
-			ownerKind, ownerName := d.getWorkloadOwner(ctx, ns, pod)
+			ownerKind, ownerName := getWorkloadOwnerCached(ns, pod, rsOwnerCache)
 			if ownerKind == "" || ownerName == "" {
 				continue
 			}
@@ -496,34 +516,32 @@ func (d *Discoverer) addEdgesFromPodEnv(ctx context.Context, g *model.Graph, nam
 	}
 }
 
-func (d *Discoverer) getWorkloadOwner(ctx context.Context, namespace string, pod *corev1.Pod) (kind, name string) {
+type ownerInfo struct {
+	kind string
+	name string
+}
+
+// getWorkloadOwnerCached resolves pod → workload using a pre-fetched ReplicaSet cache.
+// Avoids per-pod API calls for ReplicaSet ownership resolution.
+func getWorkloadOwnerCached(namespace string, pod *corev1.Pod, rsCache map[string]ownerInfo) (string, string) {
 	for _, ref := range pod.OwnerReferences {
 		switch ref.Kind {
 		case "ReplicaSet":
-			rs, err := d.clientset.AppsV1().ReplicaSets(namespace).Get(ctx, ref.Name, metav1.GetOptions{})
-			if err != nil {
-				return "Deployment", ref.Name // fallback to RS name
+			key := namespace + "/" + ref.Name
+			if info, ok := rsCache[key]; ok {
+				return info.kind, info.name
 			}
-			for _, o := range rs.OwnerReferences {
-				if o.Kind == "Deployment" {
-					return "Deployment", o.Name
-				}
+			// Fallback: strip hash suffix to guess Deployment name.
+			name := ref.Name
+			if idx := strings.LastIndex(name, "-"); idx > 0 {
+				name = name[:idx]
 			}
-			return "ReplicaSet", ref.Name
+			return "Deployment", name
 		case "StatefulSet":
 			return "StatefulSet", ref.Name
 		case "DaemonSet":
 			return "DaemonSet", ref.Name
 		case "Job":
-			job, err := d.clientset.BatchV1().Jobs(namespace).Get(ctx, ref.Name, metav1.GetOptions{})
-			if err != nil {
-				return "Job", ref.Name
-			}
-			for _, o := range job.OwnerReferences {
-				if o.Kind == "CronJob" {
-					return "CronJob", o.Name
-				}
-			}
 			return "Job", ref.Name
 		}
 	}

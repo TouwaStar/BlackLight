@@ -370,10 +370,78 @@ func serveWeb(mgr *Manager, port int) error {
 			return
 		}
 
+		// 30-second timeout so slow pods don't hang the request.
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
 		d := mgr.Discoverer()
+
+		// Batch-resolve workload → pod: single cluster-wide pod list
+		// instead of 2 API calls per workload (Get workload + List pods).
+		workloadNodes := make(map[string]struct{}) // node IDs we care about
+		for _, node := range g.Nodes {
+			switch node.Kind {
+			case "Deployment", "StatefulSet", "DaemonSet", "Job":
+				workloadNodes[node.ID] = struct{}{}
+			}
+		}
+		if len(workloadNodes) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]struct{}{})
+			return
+		}
+
+		type podTarget struct {
+			nodeID    string
+			namespace string
+			podName   string
+			container string
+		}
+
+		allPods, err := d.Clientset().CoreV1().Pods("").List(ctx, metav1.ListOptions{
+			FieldSelector: "status.phase=Running",
+		})
+		if err != nil {
+			http.Error(w, "list pods: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Map each workload to one running pod by matching owner references.
+		targets := make(map[string]podTarget) // nodeID → podTarget
+		for i := range allPods.Items {
+			pod := &allPods.Items[i]
+			ownerKind, ownerName := ownerFromPodRefs(pod)
+			if ownerKind == "" {
+				continue
+			}
+			nodeID := pod.Namespace + "/" + ownerKind + "/" + ownerName
+			if _, want := workloadNodes[nodeID]; !want {
+				continue
+			}
+			if _, have := targets[nodeID]; have {
+				continue // already picked a pod for this workload
+			}
+			container := ""
+			for _, cs := range pod.Status.ContainerStatuses {
+				if cs.Ready && cs.State.Running != nil {
+					container = cs.Name
+					break
+				}
+			}
+			if container == "" && len(pod.Spec.Containers) > 0 {
+				container = pod.Spec.Containers[0].Name
+			}
+			targets[nodeID] = podTarget{
+				nodeID:    nodeID,
+				namespace: pod.Namespace,
+				podName:   pod.Name,
+				container: container,
+			}
+		}
+
 		type result struct {
-			NodeID string `json:"node_id"`
-			Matches int   `json:"matches"`
+			NodeID  string `json:"node_id"`
+			Matches int    `json:"matches"`
 		}
 		var (
 			mu      sync.Mutex
@@ -383,28 +451,19 @@ func serveWeb(mgr *Manager, port int) error {
 
 		// Limit concurrency to avoid overwhelming the API server.
 		sem := make(chan struct{}, 5)
+		queryLower := strings.ToLower(query)
 
-		for _, node := range g.Nodes {
-			switch node.Kind {
-			case "Deployment", "StatefulSet", "DaemonSet", "Job":
-			default:
-				continue
-			}
+		for _, pt := range targets {
 			wg.Add(1)
-			go func(kind, namespace, name, nodeID string) {
+			go func(pt podTarget) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				podName, container, err := findPodForWorkload(r.Context(), d.Clientset(), kind, namespace, name)
-				if err != nil {
-					return
-				}
-
-				stream, err := d.Clientset().CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+				stream, err := d.Clientset().CoreV1().Pods(pt.namespace).GetLogs(pt.podName, &corev1.PodLogOptions{
 					TailLines: &tailLines,
-					Container: container,
-				}).Stream(r.Context())
+					Container: pt.container,
+				}).Stream(ctx)
 				if err != nil {
 					return
 				}
@@ -412,7 +471,6 @@ func serveWeb(mgr *Manager, port int) error {
 
 				count := 0
 				scanner := bufio.NewScanner(stream)
-				queryLower := strings.ToLower(query)
 				for scanner.Scan() {
 					if strings.Contains(strings.ToLower(scanner.Text()), queryLower) {
 						count++
@@ -420,10 +478,10 @@ func serveWeb(mgr *Manager, port int) error {
 				}
 				if count > 0 {
 					mu.Lock()
-					results = append(results, result{NodeID: nodeID, Matches: count})
+					results = append(results, result{NodeID: pt.nodeID, Matches: count})
 					mu.Unlock()
 				}
-			}(node.Kind, node.Namespace, node.Name, node.ID)
+			}(pt)
 		}
 		wg.Wait()
 
@@ -495,6 +553,28 @@ func (b *wsBridge) readLoop(cancel context.CancelFunc) {
 			return
 		}
 	}
+}
+
+// ownerFromPodRefs derives workload kind+name from pod owner references.
+// Strips the ReplicaSet hash suffix to get the Deployment name.
+func ownerFromPodRefs(pod *corev1.Pod) (string, string) {
+	for _, ref := range pod.OwnerReferences {
+		switch ref.Kind {
+		case "ReplicaSet":
+			name := ref.Name
+			if idx := strings.LastIndex(name, "-"); idx > 0 {
+				name = name[:idx]
+			}
+			return "Deployment", name
+		case "StatefulSet":
+			return "StatefulSet", ref.Name
+		case "DaemonSet":
+			return "DaemonSet", ref.Name
+		case "Job":
+			return "Job", ref.Name
+		}
+	}
+	return "", ""
 }
 
 // findPodForWorkload resolves a workload (Deployment, StatefulSet, etc.) to a running pod.
