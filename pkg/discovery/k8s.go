@@ -568,9 +568,38 @@ func (d *Discoverer) addEdgesFromPodEnv(ctx context.Context, g *model.Graph, nam
 			}
 			refs := d.extractServiceRefsFromEnv(ctx, ns, pod.Spec.Containers, cmCache)
 			for _, ref := range refs {
+				// Try to match an in-cluster Service first.
 				targetID := model.NodeID("Service", ns, ref.serviceName)
+				if existingIDs[targetID] {
+					edgeKey := fromID + "\t" + targetID + "\t" + ref.envKey
+					if seenEdges[edgeKey] {
+						continue
+					}
+					seenEdges[edgeKey] = true
+					g.Edges = append(g.Edges, model.Edge{
+						From:   fromID,
+						To:     targetID,
+						Kind:   "env_ref",
+						Detail: ref.envKey,
+					})
+					continue
+				}
+				// No in-cluster match — if it's an external hostname, create an External node.
+				if ref.hostname == "" {
+					continue
+				}
+				targetID = model.NodeID("External", "", ref.hostname)
+				if !existingIDs[targetID] {
+					g.Nodes = append(g.Nodes, model.Node{
+						ID:          targetID,
+						Kind:        "External",
+						Name:        ref.hostname,
+						DisplayName: ref.hostname,
+					})
+					existingIDs[targetID] = true
+				}
 				edgeKey := fromID + "\t" + targetID + "\t" + ref.envKey
-				if !existingIDs[targetID] || seenEdges[edgeKey] {
+				if seenEdges[edgeKey] {
 					continue
 				}
 				seenEdges[edgeKey] = true
@@ -618,7 +647,8 @@ func getWorkloadOwnerCached(namespace string, pod *corev1.Pod, rsCache map[strin
 }
 
 type serviceRef struct {
-	serviceName string
+	serviceName string // short name for in-cluster matching
+	hostname    string // full hostname (empty for in-cluster refs)
 	envKey      string
 }
 
@@ -640,12 +670,16 @@ func (d *Discoverer) extractServiceRefsFromEnv(ctx context.Context, ns string, c
 			if val == "" {
 				continue
 			}
-			svcName := extractServiceNameFromValue(val)
-			if svcName == "" || seen[svcName+key] {
+			svcName, host := extractHostAndService(val)
+			if svcName == "" && host == "" {
 				continue
 			}
-			seen[svcName+key] = true
-			refs = append(refs, serviceRef{serviceName: svcName, envKey: key})
+			dedup := svcName + host + key
+			if seen[dedup] {
+				continue
+			}
+			seen[dedup] = true
+			refs = append(refs, serviceRef{serviceName: svcName, hostname: host, envKey: key})
 		}
 	}
 	return refs
@@ -683,30 +717,71 @@ func hasServiceRefSuffix(key string) bool {
 	return false
 }
 
-func extractServiceNameFromValue(val string) string {
+// extractHostAndService parses an env var value and returns:
+//   - svcName: the short service name (first DNS segment) for in-cluster matching
+//   - host: the full hostname (empty if it looks like a plain in-cluster ref)
+func extractHostAndService(val string) (svcName, host string) {
 	// Kubernetes DNS: <svc>.<ns>.svc.cluster.local or <svc>.<ns> or just <svc>
 	// URLs: http://svc:port, https://svc.ns.svc.cluster.local
 	val = strings.TrimPrefix(val, "http://")
 	val = strings.TrimPrefix(val, "https://")
-	// Strip port
+	// Strip userinfo (e.g. postgres://user:pass@host)
+	if at := strings.Index(val, "@"); at >= 0 {
+		val = val[at+1:]
+	}
+	// Strip port and path
 	for i, r := range val {
 		if r == ':' || r == '/' {
 			val = val[:i]
 			break
 		}
 	}
-	// Take first segment (service name in same-namespace form)
+	if val == "" || isNumeric(val) {
+		return "", ""
+	}
+
+	// Check if this is an external hostname (not k8s internal DNS).
+	// k8s internal: svc, svc.ns, svc.ns.svc, svc.ns.svc.cluster.local
+	// External: anything with dots that doesn't end in .svc.cluster.local
+	// or has many segments suggesting a real FQDN.
+	if isExternalHostname(val) {
+		host = val
+	}
+
+	// Take first segment as service name for in-cluster matching.
+	svcName = val
 	for i, r := range val {
 		if r == '.' {
-			val = val[:i]
+			svcName = val[:i]
 			break
 		}
 	}
-	// Reject empty, purely numeric (port numbers), or IP-address-like values
-	if val == "" || isNumeric(val) {
-		return ""
+	if svcName == "" || isNumeric(svcName) {
+		return "", host
 	}
-	return val
+	return svcName, host
+}
+
+// isExternalHostname returns true if hostname looks like an external FQDN
+// rather than a Kubernetes internal DNS name.
+func isExternalHostname(h string) bool {
+	// No dots = plain service name (in-cluster)
+	if !strings.Contains(h, ".") {
+		return false
+	}
+	// k8s internal patterns: svc.ns.svc.cluster.local, svc.ns.svc, svc.ns
+	lower := strings.ToLower(h)
+	if strings.HasSuffix(lower, ".svc.cluster.local") || strings.HasSuffix(lower, ".svc") {
+		return false
+	}
+	// Count segments — k8s internal is typically 2 segments (svc.ns).
+	// External FQDNs usually have 3+ segments or contain known external indicators.
+	parts := strings.Split(h, ".")
+	if len(parts) >= 3 {
+		return true
+	}
+	// 2-segment names like "redis.default" are k8s internal.
+	return false
 }
 
 func isNumeric(s string) bool {

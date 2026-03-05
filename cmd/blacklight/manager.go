@@ -39,6 +39,7 @@ type Manager struct {
 	idMap        map[string]string // collapsed Service ID → Workload ID
 	recentScans  []timedSnapshot   // rolling window of recent scans
 	trafficEdges map[string]model.Edge // edges discovered from traffic (key: "from\tto")
+	trafficNodes map[string]model.Node // External nodes created from traffic (key: node ID)
 
 	subsMu sync.Mutex
 	subs   map[chan Event]struct{}
@@ -57,6 +58,7 @@ func NewManager(d *discovery.Discoverer, st *store.Store, sourcePath string) *Ma
 		sourcePath:   sourcePath,
 		namespace:    d.Namespace(),
 		trafficEdges: make(map[string]model.Edge),
+		trafficNodes: make(map[string]model.Node),
 		subs:         make(map[chan Event]struct{}),
 	}
 }
@@ -301,6 +303,7 @@ func (m *Manager) trafficLoop(ctx context.Context) {
 }
 
 // addTrafficEdges checks for traffic between nodes that have no edge in the graph.
+// Also creates External nodes for cloud traffic connections.
 // Returns true if the graph was updated.
 func (m *Manager) addTrafficEdges(snap *model.TrafficSnapshot) bool {
 	if snap == nil {
@@ -336,18 +339,57 @@ func (m *Manager) addTrafficEdges(snap *model.TrafficSnapshot) bool {
 		edgeSet[src+"\t"+tgt] = true
 		changed = true
 	}
+
+	// Create External nodes for cloud traffic (RDS, S3, etc.).
+	for _, cl := range snap.Cloud {
+		if !nodeSet[cl.NodeID] {
+			continue
+		}
+		for _, ip := range cl.TopIPs {
+			hostname := ip.IP // resolved DNS hostname (or raw IP if unresolved)
+			extID := model.NodeID("External", "", hostname)
+			if !nodeSet[extID] {
+				node := model.Node{
+					ID:          extID,
+					Kind:        "External",
+					Name:        hostname,
+					DisplayName: hostname,
+				}
+				m.graph.Nodes = append(m.graph.Nodes, node)
+				m.trafficNodes[extID] = node
+				nodeSet[extID] = true
+				changed = true
+			}
+			key := cl.NodeID + "\t" + extID
+			if !edgeSet[key] {
+				edge := model.Edge{From: cl.NodeID, To: extID, Kind: "traffic", Detail: "cloud"}
+				m.trafficEdges[key] = edge
+				m.graph.Edges = append(m.graph.Edges, edge)
+				edgeSet[key] = true
+				changed = true
+			}
+		}
+	}
+
 	return changed
 }
 
-// mergeTrafficEdgesLocked re-applies traffic-discovered edges to the current graph.
+// mergeTrafficEdgesLocked re-applies traffic-discovered nodes and edges to the current graph.
 // Must be called while holding m.mu.
 func (m *Manager) mergeTrafficEdgesLocked() {
-	if len(m.trafficEdges) == 0 {
+	if len(m.trafficEdges) == 0 && len(m.trafficNodes) == 0 {
 		return
 	}
 	nodeSet := make(map[string]bool, len(m.graph.Nodes))
 	for _, n := range m.graph.Nodes {
 		nodeSet[n.ID] = true
+	}
+	// Re-add External nodes from traffic that aren't in the current graph.
+	for id, node := range m.trafficNodes {
+		if !nodeSet[id] {
+			m.graph.Nodes = append(m.graph.Nodes, node)
+			nodeSet[id] = true
+		}
 	}
 	edgeSet := make(map[string]bool, len(m.graph.Edges))
 	for _, e := range m.graph.Edges {
@@ -364,6 +406,17 @@ func (m *Manager) mergeTrafficEdgesLocked() {
 		}
 		m.graph.Edges = append(m.graph.Edges, edge)
 		edgeSet[edge.From+"\t"+edge.To] = true
+	}
+	// Prune trafficNodes not referenced by any trafficEdge.
+	referenced := make(map[string]bool, len(m.trafficEdges))
+	for _, edge := range m.trafficEdges {
+		referenced[edge.From] = true
+		referenced[edge.To] = true
+	}
+	for id := range m.trafficNodes {
+		if !referenced[id] {
+			delete(m.trafficNodes, id)
+		}
 	}
 }
 

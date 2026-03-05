@@ -43,7 +43,7 @@ type Scanner struct {
 	restConfig *rest.Config
 	namespace  string
 
-	dnsCache   sync.Map // IP string → bool (isCloud), persists across scans
+	dnsCache   sync.Map // IP string → string (resolved cloud hostname, "" if not cloud)
 	failedPods sync.Map // pod name → time.Time (skip exec until this time)
 }
 
@@ -293,10 +293,10 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 	}
 	for wid, b := range byWID {
 		if len(b.external) > 0 {
-			snap.External = append(snap.External, buildExtTraffic(wid, b.external))
+			snap.External = append(snap.External, s.buildExtTraffic(wid, b.external))
 		}
 		if len(b.cloud) > 0 {
-			snap.Cloud = append(snap.Cloud, buildExtTraffic(wid, b.cloud))
+			snap.Cloud = append(snap.Cloud, s.buildExtTraffic(wid, b.cloud))
 		}
 	}
 	log.Printf("traffic scan: %v (%d connections, %d workloads)", time.Since(scanStart), len(snap.Connections), len(workloadPods))
@@ -419,26 +419,38 @@ func isPrivateIP(ip net.IP) bool {
 }
 
 // isCloudIPCached checks reverse DNS with caching to detect cloud provider IPs.
+// Returns true if cloud, and caches the resolved hostname for later use.
 func (s *Scanner) isCloudIPCached(ip string) bool {
 	if val, ok := s.dnsCache.Load(ip); ok {
-		return val.(bool)
+		h, _ := val.(string)
+		return h != ""
 	}
-	result := false
+	resolved := ""
 	resolver := &net.Resolver{}
 	ctx, cancel := context.WithTimeout(context.Background(), DNSTimeout)
 	defer cancel()
 	names, err := resolver.LookupAddr(ctx, ip)
 	if err == nil && len(names) > 0 {
-		host := strings.ToLower(names[0])
+		host := strings.ToLower(strings.TrimSuffix(names[0], "."))
 		for _, suffix := range cloudDNSSuffixes {
 			if strings.Contains(host, suffix) {
-				result = true
+				resolved = host
 				break
 			}
 		}
 	}
-	s.dnsCache.Store(ip, result)
-	return result
+	s.dnsCache.Store(ip, resolved)
+	return resolved != ""
+}
+
+// resolveIP returns the cached DNS hostname for an IP, or the IP itself if unresolved.
+func (s *Scanner) resolveIP(ip string) string {
+	if val, ok := s.dnsCache.Load(ip); ok {
+		if h, _ := val.(string); h != "" {
+			return h
+		}
+	}
+	return ip
 }
 
 var cloudDNSSuffixes = []string{
@@ -450,12 +462,13 @@ var cloudDNSSuffixes = []string{
 }
 
 // buildExtTraffic aggregates an IP→count map into an ExternalTraffic entry.
-func buildExtTraffic(wid string, ips map[string]int) model.ExternalTraffic {
+// Uses resolved DNS hostnames from the cache when available.
+func (s *Scanner) buildExtTraffic(wid string, ips map[string]int) model.ExternalTraffic {
 	total := 0
 	var topIPs []model.IPCount
 	for ip, count := range ips {
 		total += count
-		topIPs = append(topIPs, model.IPCount{IP: ip, Count: count})
+		topIPs = append(topIPs, model.IPCount{IP: s.resolveIP(ip), Count: count})
 	}
 	sortIPCounts(topIPs)
 	if len(topIPs) > 5 {

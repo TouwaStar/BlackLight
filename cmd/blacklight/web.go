@@ -371,6 +371,28 @@ func serveWeb(mgr *Manager, port int) error {
 		w.Write([]byte(text))
 	})
 
+	http.HandleFunc("/api/env", func(w http.ResponseWriter, r *http.Request) {
+		kind, namespace, name, err := workloadParams(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		d := mgr.Discoverer()
+		cs := d.Clientset()
+		podName, _, err := findPodForWorkload(r.Context(), cs, kind, namespace, name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp, err := getEnvVars(r.Context(), cs, namespace, podName)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
 	http.HandleFunc("/api/search-logs", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query().Get("q")
 		if query == "" {
@@ -935,4 +957,148 @@ func describeResource(ctx context.Context, clientset *kubernetes.Clientset, kind
 	}
 
 	return b.String(), nil
+}
+
+type envEntry struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Source string `json:"source,omitempty"`
+}
+
+type containerEnv struct {
+	Name string     `json:"name"`
+	Env  []envEntry `json:"env"`
+}
+
+type envResponse struct {
+	Pod        string         `json:"pod"`
+	Containers []containerEnv `json:"containers"`
+}
+
+func getEnvVars(ctx context.Context, cs *kubernetes.Clientset, namespace, podName string) (*envResponse, error) {
+	pod, err := cs.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get pod: %w", err)
+	}
+
+	// Cache fetched ConfigMaps/Secrets to avoid redundant API calls.
+	cmCache := map[string]*corev1.ConfigMap{}
+	secCache := map[string]*corev1.Secret{}
+
+	fetchCM := func(name string) (*corev1.ConfigMap, error) {
+		if cm, ok := cmCache[name]; ok {
+			return cm, nil
+		}
+		cm, err := cs.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		cmCache[name] = cm
+		return cm, nil
+	}
+	fetchSec := func(name string) (*corev1.Secret, error) {
+		if sec, ok := secCache[name]; ok {
+			return sec, nil
+		}
+		sec, err := cs.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		secCache[name] = sec
+		return sec, nil
+	}
+
+	resp := &envResponse{Pod: podName}
+
+	for _, c := range pod.Spec.Containers {
+		ce := containerEnv{Name: c.Name}
+
+		// EnvFrom: bulk import from ConfigMap/Secret.
+		for _, ef := range c.EnvFrom {
+			prefix := ef.Prefix
+			if ef.ConfigMapRef != nil {
+				cm, err := fetchCM(ef.ConfigMapRef.Name)
+				if err != nil {
+					if ef.ConfigMapRef.Optional != nil && *ef.ConfigMapRef.Optional {
+						continue
+					}
+					ce.Env = append(ce.Env, envEntry{
+						Name:   prefix + "(*)",
+						Value:  fmt.Sprintf("<error: %v>", err),
+						Source: "ConfigMap/" + ef.ConfigMapRef.Name,
+					})
+					continue
+				}
+				for k, v := range cm.Data {
+					ce.Env = append(ce.Env, envEntry{
+						Name:   prefix + k,
+						Value:  v,
+						Source: "ConfigMap/" + ef.ConfigMapRef.Name,
+					})
+				}
+			}
+			if ef.SecretRef != nil {
+				sec, err := fetchSec(ef.SecretRef.Name)
+				if err != nil {
+					if ef.SecretRef.Optional != nil && *ef.SecretRef.Optional {
+						continue
+					}
+					ce.Env = append(ce.Env, envEntry{
+						Name:   prefix + "(*)",
+						Value:  fmt.Sprintf("<error: %v>", err),
+						Source: "Secret/" + ef.SecretRef.Name,
+					})
+					continue
+				}
+				for k, v := range sec.Data {
+					ce.Env = append(ce.Env, envEntry{
+						Name:   prefix + k,
+						Value:  string(v),
+						Source: "Secret/" + ef.SecretRef.Name,
+					})
+				}
+			}
+		}
+
+		// Env: individual vars.
+		for _, e := range c.Env {
+			entry := envEntry{Name: e.Name}
+			if e.ValueFrom == nil {
+				entry.Value = e.Value
+			} else if ref := e.ValueFrom.ConfigMapKeyRef; ref != nil {
+				entry.Source = "ConfigMap/" + ref.Name + "/" + ref.Key
+				cm, err := fetchCM(ref.Name)
+				if err != nil {
+					if ref.Optional != nil && *ref.Optional {
+						entry.Value = ""
+					} else {
+						entry.Value = fmt.Sprintf("<error: %v>", err)
+					}
+				} else {
+					entry.Value = cm.Data[ref.Key]
+				}
+			} else if ref := e.ValueFrom.SecretKeyRef; ref != nil {
+				entry.Source = "Secret/" + ref.Name + "/" + ref.Key
+				sec, err := fetchSec(ref.Name)
+				if err != nil {
+					if ref.Optional != nil && *ref.Optional {
+						entry.Value = ""
+					} else {
+						entry.Value = fmt.Sprintf("<error: %v>", err)
+					}
+				} else {
+					entry.Value = string(sec.Data[ref.Key])
+				}
+			} else if ref := e.ValueFrom.FieldRef; ref != nil {
+				entry.Source = "fieldRef/" + ref.FieldPath
+			} else if ref := e.ValueFrom.ResourceFieldRef; ref != nil {
+				entry.Source = "resourceFieldRef/" + ref.Resource
+			}
+			ce.Env = append(ce.Env, entry)
+		}
+
+		resp.Containers = append(resp.Containers, ce)
+	}
+
+	return resp, nil
 }

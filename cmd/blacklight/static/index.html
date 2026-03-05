@@ -174,6 +174,36 @@
       font-size: 0.7rem; line-height: 1.5; white-space: pre-wrap;
       word-break: break-all; color: #c9d1d9; margin: 0;
     }
+    #envPanel {
+      display: none; flex-shrink: 0; height: 35vh;
+      background: #0d1117; border-top: 1px solid #30363d;
+      flex-direction: column;
+    }
+    #envHeader {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.3rem 0.75rem; background: #161b22;
+      border-bottom: 1px solid #30363d; flex-shrink: 0;
+    }
+    #envTitle { font-size: 0.75rem; color: #e6edf3; font-weight: 600; }
+    #envContent {
+      flex: 1; overflow-y: auto; padding: 0.5rem 0.75rem;
+      font-size: 0.7rem; color: #c9d1d9;
+    }
+    .env-table { width: 100%; border-collapse: collapse; margin-bottom: 0.75rem; }
+    .env-table th {
+      text-align: left; padding: 0.25rem 0.5rem; color: #8b949e;
+      border-bottom: 1px solid #30363d; font-weight: 600; font-size: 0.65rem;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .env-table td {
+      padding: 0.2rem 0.5rem; border-bottom: 1px solid #21262d;
+      font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.68rem;
+      vertical-align: top;
+    }
+    .env-table td:first-child { color: #58a6ff; white-space: nowrap; }
+    .env-table td:nth-child(2) { color: #c9d1d9; word-break: break-all; max-width: 400px; }
+    .env-table td:nth-child(3) { color: #8b949e; font-size: 0.63rem; white-space: nowrap; }
+    .env-container-name { color: #3fb950; font-weight: 600; margin: 0.5rem 0 0.25rem; font-size: 0.72rem; }
     #globalLogSearch {
       font-family: inherit; font-size: 0.7rem;
       background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
@@ -205,6 +235,7 @@
       <div class="legend-item"><span class="legend-dot" style="background:#79c0ff"></span> CronJob</div>
       <div class="legend-item"><span class="legend-dot" style="background:#7ee787"></span> Job</div>
       <div class="legend-item"><span class="legend-dot" style="background:#58a6ff"></span> Service (standalone)</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#f78166"></span> External</div>
       <div class="legend-item"><span class="legend-dot" style="background:#39d353;border-radius:50%"></span> Active traffic</div>
       <div class="legend-item"><span class="legend-dot" style="background:#f85149;border-radius:50%"></span> Connection errors</div>
       <div class="legend-item"><span class="legend-dot" style="background:#0d1117;border:2px solid #f0883e"></span> External traffic</div>
@@ -258,7 +289,8 @@
   <div id="contextMenu">
     <div class="ctx-item" id="ctxLogs" onclick="logsFromMenu()">Logs</div>
     <div class="ctx-item" id="ctxShell" onclick="shellFromMenu()">Shell</div>
-    <div class="ctx-item" onclick="describeFromMenu()">Describe</div>
+    <div class="ctx-item" id="ctxDescribe" onclick="describeFromMenu()">Describe</div>
+    <div class="ctx-item" id="ctxEnv" onclick="envFromMenu()">Env</div>
   </div>
   <div id="descPanel" style="display:none">
     <div id="descHeader">
@@ -267,12 +299,20 @@
     </div>
     <pre id="descContent"></pre>
   </div>
+  <div id="envPanel" style="display:none">
+    <div id="envHeader">
+      <span id="envTitle"></span>
+      <button class="log-btn" onclick="closeEnv()">Close</button>
+    </div>
+    <div id="envContent"></div>
+  </div>
 
   <script>
     const KIND_COLORS = {
       Ingress: '#f0883e', Service: '#58a6ff', Deployment: '#3fb950',
       StatefulSet: '#a371f7', DaemonSet: '#d29922',
       CronJob: '#79c0ff', Job: '#7ee787',
+      External: '#f78166',
     };
     const EDGE_COLORS = {
       ingress_backend: '#f0883e',
@@ -283,6 +323,7 @@
       Ingress: 'round-diamond', Service: 'round-rectangle',
       Deployment: 'round-rectangle', StatefulSet: 'barrel', DaemonSet: 'hexagon',
       CronJob: 'diamond', Job: 'tag',
+      External: 'round-triangle',
     };
 
     const STYLES = [
@@ -591,23 +632,33 @@
       if (fp === lastGraphFingerprint && cy) return;
       lastGraphFingerprint = fp;
 
-      // Incremental update: if only edges changed (same nodes), add/remove edges
-      // without destroying and recreating the entire graph. Avoids visual flash.
+      // Incremental update: if nodes are a superset (or same) and no nodes were removed,
+      // add/remove nodes and edges without destroying cytoscape. Preserves viewport.
       if (cy) {
         const curNodeIds = new Set();
         cy.nodes().forEach(n => curNodeIds.add(n.id()));
         const newNodeIds = new Set((graph.nodes || []).map(n => n.id));
-        if (curNodeIds.size === newNodeIds.size && [...newNodeIds].every(id => curNodeIds.has(id))) {
+        // Check no nodes were removed (all current nodes still exist in new graph).
+        const noRemovals = [...curNodeIds].every(id => newNodeIds.has(id));
+        if (noRemovals) {
+          // Add new nodes that don't exist yet.
+          const newNodes = (graph.nodes || []).filter(n => !curNodeIds.has(n.id));
+          for (const n of newNodes) {
+            cy.add({ data: {
+              id: n.id, label: n.name, kind: n.kind, namespace: n.namespace,
+              purpose: n.purpose || '', fullLabel: n.display_name,
+              meta: n.meta || {},
+            }});
+          }
+          // Sync edges.
           const want = new Map();
           for (const e of (graph.edges || [])) {
             want.set(e.from + '\t' + e.to + '\t' + e.kind, e);
           }
-          // Remove edges no longer in graph data.
           cy.edges().forEach(edge => {
             const k = edge.data('source') + '\t' + edge.data('target') + '\t' + edge.data('kind');
             if (!want.has(k)) edge.remove();
           });
-          // Add new edges from graph data.
           const have = new Set();
           cy.edges().forEach(edge => {
             have.add(edge.data('source') + '\t' + edge.data('target') + '\t' + edge.data('kind'));
@@ -621,6 +672,13 @@
                 fullLabel: e.detail ? e.kind + ': ' + e.detail : e.kind,
                 connCount: 0,
               }});
+            }
+          }
+          // Layout only the newly added nodes (don't move existing ones).
+          if (newNodes.length > 0) {
+            const added = cy.nodes().filter(n => !curNodeIds.has(n.id()));
+            if (added.length > 0) {
+              added.layout({ name: 'grid', boundingBox: { x1: 50, y1: 50, w: 200, h: 200 }, fit: false }).run();
             }
           }
           if (lastTrafficSnapshot) applyTraffic(lastTrafficSnapshot);
@@ -667,11 +725,11 @@
 
       let layoutCfg;
       if (hasSome && !missingPositions) {
-        // All nodes have saved positions — use them directly.
-        layoutCfg = { name: 'preset', fit: true, padding: 50 };
+        // All nodes have saved positions — use them directly, don't reset viewport.
+        layoutCfg = { name: 'preset', fit: false, padding: 50 };
       } else if (hasSome && !autoArrange) {
         // Some positions saved, auto-arrange off — use preset, new nodes get default (0,0) position.
-        layoutCfg = { name: 'preset', fit: true, padding: 50 };
+        layoutCfg = { name: 'preset', fit: false, padding: 50 };
       } else if (hasSome && autoArrange) {
         // Some positions saved but new nodes appeared — re-layout to place them.
         layoutCfg = getLayoutConfig(false);
@@ -967,10 +1025,17 @@
       const node = evt.target;
       const kind = node.data('kind');
       ctxNode = node;
-      // Show Logs/Shell only for workload kinds that have pods.
+      // Show Logs/Shell/Env only for workload kinds that have pods.
       const hasPods = ['Deployment', 'StatefulSet', 'DaemonSet', 'Job'].includes(kind);
+      const isExternal = kind === 'External';
       document.getElementById('ctxLogs').style.display = hasPods ? '' : 'none';
       document.getElementById('ctxShell').style.display = hasPods ? '' : 'none';
+      document.getElementById('ctxEnv').style.display = hasPods ? '' : 'none';
+      document.getElementById('ctxDescribe').style.display = isExternal ? 'none' : '';
+      // Don't show empty menu if no items are visible.
+      const items = ctxMenu.querySelectorAll('.ctx-item');
+      const anyVisible = [...items].some(el => el.style.display !== 'none');
+      if (!anyVisible) return;
       const pos = evt.originalEvent;
       ctxMenu.style.left = pos.clientX + 'px';
       ctxMenu.style.top = pos.clientY + 'px';
@@ -1080,6 +1145,7 @@
     }
 
     function openLogs(nodeId, kind, namespace, name) {
+      closeEnv();
       // Abort previous stream.
       if (logAbort) logAbort.abort();
       logLines = [];
@@ -1166,6 +1232,7 @@
     function openShell(kind, namespace, name) {
       closeShell();
       closeLogs();
+      closeEnv();
 
       termTitle.textContent = 'Shell: ' + namespace + '/' + name;
       termPanel.style.display = 'flex';
@@ -1259,6 +1326,7 @@
       closeLogs();
       closeShell();
       closeDescribe();
+      closeEnv();
 
       descTitle.textContent = 'Describe: ' + kind + '/' + namespace + '/' + name;
       descContent.textContent = 'Loading...';
@@ -1283,6 +1351,69 @@
     function closeDescribe() {
       descPanel.style.display = 'none';
       descContent.textContent = '';
+      if (cy) cy.resize();
+    }
+
+    // --- Env panel ---
+    const envPanel = document.getElementById('envPanel');
+    const envTitle = document.getElementById('envTitle');
+    const envContent = document.getElementById('envContent');
+
+    function envFromMenu() {
+      if (!ctxNode) return;
+      const d = ctxNode.data();
+      openEnv(d.kind, d.namespace, d.label);
+      hideContextMenu();
+    }
+
+    function openEnv(kind, namespace, name) {
+      closeLogs();
+      closeShell();
+      closeDescribe();
+      closeEnv();
+
+      envTitle.textContent = 'Env: ' + kind + '/' + namespace + '/' + name;
+      envContent.innerHTML = '<span style="color:#8b949e">Loading...</span>';
+      envPanel.style.display = 'flex';
+      if (cy) cy.resize();
+
+      fetch('/api/env?kind=' + encodeURIComponent(kind) +
+            '&namespace=' + encodeURIComponent(namespace) +
+            '&name=' + encodeURIComponent(name))
+        .then(resp => {
+          if (!resp.ok) return resp.text().then(t => { throw new Error(t); });
+          return resp.json();
+        })
+        .then(data => {
+          const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+          let html = '<div style="color:#8b949e;font-size:0.65rem;margin-bottom:0.5rem">Pod: ' +
+            esc(data.pod) + '</div>';
+          for (const c of data.containers) {
+            html += '<div class="env-container-name">' + esc(c.name) + '</div>';
+            if (!c.env || c.env.length === 0) {
+              html += '<div style="color:#8b949e;font-style:italic;margin:0.25rem 0">No environment variables</div>';
+              continue;
+            }
+            const sorted = c.env.slice().sort((a, b) => a.name.localeCompare(b.name));
+            html += '<table class="env-table"><tr><th>Name</th><th>Value</th><th>Source</th></tr>';
+            for (const e of sorted) {
+              const raw = e.value || '';
+              const val = raw.length > 200 ? esc(raw.substring(0, 200)) + '...' : (raw ? esc(raw) : '<em style="color:#484f58">empty</em>');
+              const src = e.source ? esc(e.source) : '';
+              html += '<tr><td>' + esc(e.name) + '</td><td>' + val + '</td><td>' + src + '</td></tr>';
+            }
+            html += '</table>';
+          }
+          envContent.innerHTML = html;
+        })
+        .catch(err => {
+          envContent.textContent = 'Error: ' + err.message;
+        });
+    }
+
+    function closeEnv() {
+      envPanel.style.display = 'none';
+      envContent.innerHTML = '';
       if (cy) cy.resize();
     }
 
