@@ -137,6 +137,12 @@ func (d *Discoverer) Discover(ctx context.Context) (*model.Graph, error) {
 				Labels:      dep.Labels,
 				Annotations: dep.Annotations,
 				Purpose:     purposeFromAnnotations(dep.Annotations),
+				Meta: map[string]any{
+					"replicas":      dep.Status.Replicas,
+					"readyReplicas": dep.Status.ReadyReplicas,
+					"strategy":      string(dep.Spec.Strategy.Type),
+					"images":        containerImages(dep.Spec.Template.Spec.Containers),
+				},
 			})
 		}
 		for i := range statefulSets.Items {
@@ -151,6 +157,11 @@ func (d *Discoverer) Discover(ctx context.Context) (*model.Graph, error) {
 				Labels:      sts.Labels,
 				Annotations: sts.Annotations,
 				Purpose:     purposeFromAnnotations(sts.Annotations),
+				Meta: map[string]any{
+					"replicas":      sts.Status.Replicas,
+					"readyReplicas": sts.Status.ReadyReplicas,
+					"images":        containerImages(sts.Spec.Template.Spec.Containers),
+				},
 			})
 		}
 		for i := range daemonSets.Items {
@@ -165,11 +176,23 @@ func (d *Discoverer) Discover(ctx context.Context) (*model.Graph, error) {
 				Labels:      ds.Labels,
 				Annotations: ds.Annotations,
 				Purpose:     purposeFromAnnotations(ds.Annotations),
+				Meta: map[string]any{
+					"desired": ds.Status.DesiredNumberScheduled,
+					"ready":   ds.Status.NumberReady,
+					"images":  containerImages(ds.Spec.Template.Spec.Containers),
+				},
 			})
 		}
 		for i := range cronJobs.Items {
 			cj := &cronJobs.Items[i]
 			id := model.NodeID("CronJob", ns, cj.Name)
+			meta := map[string]any{
+				"schedule": cj.Spec.Schedule,
+				"images":   containerImages(cj.Spec.JobTemplate.Spec.Template.Spec.Containers),
+			}
+			if cj.Status.LastScheduleTime != nil {
+				meta["lastSchedule"] = cj.Status.LastScheduleTime.Time.Unix()
+			}
 			g.Nodes = append(g.Nodes, model.Node{
 				ID:          id,
 				Kind:        "CronJob",
@@ -179,6 +202,7 @@ func (d *Discoverer) Discover(ctx context.Context) (*model.Graph, error) {
 				Labels:      cj.Labels,
 				Annotations: cj.Annotations,
 				Purpose:     purposeFromAnnotations(cj.Annotations),
+				Meta:        meta,
 			})
 		}
 		for i := range jobs.Items {
@@ -187,6 +211,15 @@ func (d *Discoverer) Discover(ctx context.Context) (*model.Graph, error) {
 				continue
 			}
 			id := model.NodeID("Job", ns, job.Name)
+			meta := map[string]any{
+				"images": containerImages(job.Spec.Template.Spec.Containers),
+			}
+			if job.Status.Succeeded > 0 {
+				meta["succeeded"] = job.Status.Succeeded
+			}
+			if job.Status.Failed > 0 {
+				meta["failed"] = job.Status.Failed
+			}
 			g.Nodes = append(g.Nodes, model.Node{
 				ID:          id,
 				Kind:        "Job",
@@ -196,6 +229,7 @@ func (d *Discoverer) Discover(ctx context.Context) (*model.Graph, error) {
 				Labels:      job.Labels,
 				Annotations: job.Annotations,
 				Purpose:     purposeFromAnnotations(job.Annotations),
+				Meta:        meta,
 			})
 		}
 
@@ -203,6 +237,14 @@ func (d *Discoverer) Discover(ctx context.Context) (*model.Graph, error) {
 		for i := range services.Items {
 			svc := &services.Items[i]
 			sid := model.NodeID("Service", ns, svc.Name)
+			ports := make([]string, 0, len(svc.Spec.Ports))
+			for _, p := range svc.Spec.Ports {
+				entry := fmt.Sprintf("%d/%s", p.Port, p.Protocol)
+				if p.Name != "" {
+					entry = p.Name + ":" + entry
+				}
+				ports = append(ports, entry)
+			}
 			g.Nodes = append(g.Nodes, model.Node{
 				ID:          sid,
 				Kind:        "Service",
@@ -212,6 +254,11 @@ func (d *Discoverer) Discover(ctx context.Context) (*model.Graph, error) {
 				Labels:      svc.Labels,
 				Annotations: svc.Annotations,
 				Purpose:     purposeFromAnnotations(svc.Annotations),
+				Meta: map[string]any{
+					"type":      string(svc.Spec.Type),
+					"clusterIP": svc.Spec.ClusterIP,
+					"ports":     ports,
+				},
 			})
 			selector := svc.Spec.Selector
 			if len(selector) == 0 {
@@ -262,6 +309,16 @@ func (d *Discoverer) Discover(ctx context.Context) (*model.Graph, error) {
 		for i := range ingresses.Items {
 			ing := &ingresses.Items[i]
 			ingID := model.NodeID("Ingress", ns, ing.Name)
+			var hosts []string
+			for _, rule := range ing.Spec.Rules {
+				if rule.Host != "" {
+					hosts = append(hosts, rule.Host)
+				}
+			}
+			ingressClass := ""
+			if ing.Spec.IngressClassName != nil {
+				ingressClass = *ing.Spec.IngressClassName
+			}
 			g.Nodes = append(g.Nodes, model.Node{
 				ID:          ingID,
 				Kind:        "Ingress",
@@ -271,6 +328,10 @@ func (d *Discoverer) Discover(ctx context.Context) (*model.Graph, error) {
 				Labels:      ing.Labels,
 				Annotations: ing.Annotations,
 				Purpose:     purposeFromAnnotations(ing.Annotations),
+				Meta: map[string]any{
+					"hosts": hosts,
+					"class": ingressClass,
+				},
 			})
 			for _, rule := range ing.Spec.Rules {
 				if rule.HTTP == nil {
@@ -319,6 +380,14 @@ func (d *Discoverer) listNamespaces(ctx context.Context) ([]string, error) {
 		names = append(names, list.Items[i].Name)
 	}
 	return names, nil
+}
+
+func containerImages(containers []corev1.Container) []string {
+	images := make([]string, 0, len(containers))
+	for _, c := range containers {
+		images = append(images, c.Image)
+	}
+	return images
 }
 
 func isOwnedByCronJob(refs []metav1.OwnerReference) bool {

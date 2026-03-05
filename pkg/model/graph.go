@@ -10,6 +10,7 @@ type Node struct {
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Purpose     string            `json:"purpose,omitempty"` // inferred or from annotation
+	Meta        map[string]any    `json:"meta,omitempty"`    // extra details: replicas, images, ports, etc.
 }
 
 // Edge represents a directed relationship (who talks to whom / who uses whom).

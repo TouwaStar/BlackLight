@@ -351,6 +351,24 @@ func serveWeb(mgr *Manager, port int) error {
 		}
 	})
 
+	http.HandleFunc("/api/describe", func(w http.ResponseWriter, r *http.Request) {
+		kind := r.URL.Query().Get("kind")
+		namespace := r.URL.Query().Get("namespace")
+		name := r.URL.Query().Get("name")
+		if kind == "" || namespace == "" || name == "" {
+			http.Error(w, "kind, namespace, and name required", http.StatusBadRequest)
+			return
+		}
+		d := mgr.Discoverer()
+		text, err := describeResource(r.Context(), d.Clientset(), kind, namespace, name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte(text))
+	})
+
 	http.HandleFunc("/api/search-logs", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query().Get("q")
 		if query == "" {
@@ -632,4 +650,306 @@ func findPodForWorkload(ctx context.Context, clientset *kubernetes.Clientset, ki
 		return pods.Items[0].Name, pods.Items[0].Spec.Containers[0].Name, nil
 	}
 	return "", "", fmt.Errorf("no running pods found for %s/%s", kind, name)
+}
+
+// describeResource returns a kubectl-describe-like text summary for a k8s resource.
+func describeResource(ctx context.Context, clientset *kubernetes.Clientset, kind, namespace, name string) (string, error) {
+	var b strings.Builder
+	w := func(label, value string) { fmt.Fprintf(&b, "%-22s %s\n", label+":", value) }
+	section := func(title string) { fmt.Fprintf(&b, "\n%s\n", title) }
+
+	writeLabels := func(labels map[string]string) {
+		if len(labels) == 0 {
+			w("Labels", "<none>")
+			return
+		}
+		first := true
+		for k, v := range labels {
+			if first {
+				w("Labels", k+"="+v)
+				first = false
+			} else {
+				fmt.Fprintf(&b, "%-22s %s\n", "", k+"="+v)
+			}
+		}
+	}
+
+	writeAnnotations := func(annotations map[string]string) {
+		if len(annotations) == 0 {
+			w("Annotations", "<none>")
+			return
+		}
+		first := true
+		for k, v := range annotations {
+			val := k + "=" + v
+			if len(val) > 80 {
+				val = val[:80] + "..."
+			}
+			if first {
+				w("Annotations", val)
+				first = false
+			} else {
+				fmt.Fprintf(&b, "%-22s %s\n", "", val)
+			}
+		}
+	}
+
+	writeContainers := func(containers []corev1.Container) {
+		section("Containers:")
+		for _, c := range containers {
+			fmt.Fprintf(&b, "  %s:\n", c.Name)
+			fmt.Fprintf(&b, "    Image:    %s\n", c.Image)
+			if len(c.Ports) > 0 {
+				ports := make([]string, 0, len(c.Ports))
+				for _, p := range c.Ports {
+					entry := fmt.Sprintf("%d/%s", p.ContainerPort, p.Protocol)
+					if p.Name != "" {
+						entry = p.Name + " " + entry
+					}
+					ports = append(ports, entry)
+				}
+				fmt.Fprintf(&b, "    Ports:    %s\n", strings.Join(ports, ", "))
+			}
+			if len(c.Env) > 0 {
+				envCount := len(c.Env)
+				envFrom := len(c.EnvFrom)
+				detail := fmt.Sprintf("%d vars", envCount)
+				if envFrom > 0 {
+					detail += fmt.Sprintf(" + %d from refs", envFrom)
+				}
+				fmt.Fprintf(&b, "    Env:      %s\n", detail)
+			}
+			res := c.Resources
+			if len(res.Requests) > 0 || len(res.Limits) > 0 {
+				fmt.Fprintf(&b, "    Resources:\n")
+				if cpu := res.Requests.Cpu(); cpu != nil && !cpu.IsZero() {
+					fmt.Fprintf(&b, "      cpu request:     %s\n", cpu.String())
+				}
+				if mem := res.Requests.Memory(); mem != nil && !mem.IsZero() {
+					fmt.Fprintf(&b, "      memory request:  %s\n", mem.String())
+				}
+				if cpu := res.Limits.Cpu(); cpu != nil && !cpu.IsZero() {
+					fmt.Fprintf(&b, "      cpu limit:       %s\n", cpu.String())
+				}
+				if mem := res.Limits.Memory(); mem != nil && !mem.IsZero() {
+					fmt.Fprintf(&b, "      memory limit:    %s\n", mem.String())
+				}
+			}
+			if c.ReadinessProbe != nil {
+				fmt.Fprintf(&b, "    Readiness:  configured\n")
+			}
+			if c.LivenessProbe != nil {
+				fmt.Fprintf(&b, "    Liveness:   configured\n")
+			}
+		}
+	}
+
+	writeConditions := func(conditions []string) {
+		if len(conditions) == 0 {
+			return
+		}
+		section("Conditions:")
+		for _, c := range conditions {
+			fmt.Fprintf(&b, "  %s\n", c)
+		}
+	}
+
+	switch kind {
+	case "Deployment":
+		obj, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get deployment: %w", err)
+		}
+		w("Name", obj.Name)
+		w("Namespace", obj.Namespace)
+		w("Created", obj.CreationTimestamp.String())
+		writeLabels(obj.Labels)
+		writeAnnotations(obj.Annotations)
+		w("Selector", metav1.FormatLabelSelector(obj.Spec.Selector))
+		w("Replicas", fmt.Sprintf("%d desired | %d ready | %d available | %d unavailable",
+			*obj.Spec.Replicas, obj.Status.ReadyReplicas, obj.Status.AvailableReplicas, obj.Status.UnavailableReplicas))
+		w("Strategy", string(obj.Spec.Strategy.Type))
+		writeContainers(obj.Spec.Template.Spec.Containers)
+		var conds []string
+		for _, c := range obj.Status.Conditions {
+			conds = append(conds, fmt.Sprintf("%-20s %s  (%s) %s", c.Type, string(c.Status), c.Reason, c.Message))
+		}
+		writeConditions(conds)
+
+	case "StatefulSet":
+		obj, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get statefulset: %w", err)
+		}
+		w("Name", obj.Name)
+		w("Namespace", obj.Namespace)
+		w("Created", obj.CreationTimestamp.String())
+		writeLabels(obj.Labels)
+		writeAnnotations(obj.Annotations)
+		w("Selector", metav1.FormatLabelSelector(obj.Spec.Selector))
+		w("Replicas", fmt.Sprintf("%d desired | %d ready", *obj.Spec.Replicas, obj.Status.ReadyReplicas))
+		w("Update Strategy", string(obj.Spec.UpdateStrategy.Type))
+		if obj.Spec.ServiceName != "" {
+			w("Service Name", obj.Spec.ServiceName)
+		}
+		writeContainers(obj.Spec.Template.Spec.Containers)
+
+	case "DaemonSet":
+		obj, err := clientset.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get daemonset: %w", err)
+		}
+		w("Name", obj.Name)
+		w("Namespace", obj.Namespace)
+		w("Created", obj.CreationTimestamp.String())
+		writeLabels(obj.Labels)
+		writeAnnotations(obj.Annotations)
+		w("Selector", metav1.FormatLabelSelector(obj.Spec.Selector))
+		w("Nodes", fmt.Sprintf("%d desired | %d current | %d ready | %d available",
+			obj.Status.DesiredNumberScheduled, obj.Status.CurrentNumberScheduled,
+			obj.Status.NumberReady, obj.Status.NumberAvailable))
+		writeContainers(obj.Spec.Template.Spec.Containers)
+
+	case "Job":
+		obj, err := clientset.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get job: %w", err)
+		}
+		w("Name", obj.Name)
+		w("Namespace", obj.Namespace)
+		w("Created", obj.CreationTimestamp.String())
+		writeLabels(obj.Labels)
+		writeAnnotations(obj.Annotations)
+		w("Completions", fmt.Sprintf("%d", *obj.Spec.Completions))
+		w("Parallelism", fmt.Sprintf("%d", *obj.Spec.Parallelism))
+		w("Succeeded", fmt.Sprintf("%d", obj.Status.Succeeded))
+		if obj.Status.Failed > 0 {
+			w("Failed", fmt.Sprintf("%d", obj.Status.Failed))
+		}
+		writeContainers(obj.Spec.Template.Spec.Containers)
+
+	case "CronJob":
+		obj, err := clientset.BatchV1().CronJobs(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get cronjob: %w", err)
+		}
+		w("Name", obj.Name)
+		w("Namespace", obj.Namespace)
+		w("Created", obj.CreationTimestamp.String())
+		writeLabels(obj.Labels)
+		writeAnnotations(obj.Annotations)
+		w("Schedule", obj.Spec.Schedule)
+		if obj.Spec.Suspend != nil && *obj.Spec.Suspend {
+			w("Suspend", "true")
+		}
+		if obj.Status.LastScheduleTime != nil {
+			w("Last Schedule", obj.Status.LastScheduleTime.String())
+		}
+		w("Active Jobs", fmt.Sprintf("%d", len(obj.Status.Active)))
+		writeContainers(obj.Spec.JobTemplate.Spec.Template.Spec.Containers)
+
+	case "Service":
+		obj, err := clientset.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get service: %w", err)
+		}
+		w("Name", obj.Name)
+		w("Namespace", obj.Namespace)
+		w("Created", obj.CreationTimestamp.String())
+		writeLabels(obj.Labels)
+		writeAnnotations(obj.Annotations)
+		w("Type", string(obj.Spec.Type))
+		w("ClusterIP", obj.Spec.ClusterIP)
+		if len(obj.Spec.ExternalIPs) > 0 {
+			w("External IPs", strings.Join(obj.Spec.ExternalIPs, ", "))
+		}
+		if obj.Spec.LoadBalancerIP != "" {
+			w("LoadBalancer IP", obj.Spec.LoadBalancerIP)
+		}
+		for _, ing := range obj.Status.LoadBalancer.Ingress {
+			if ing.IP != "" {
+				w("LB Ingress IP", ing.IP)
+			}
+			if ing.Hostname != "" {
+				w("LB Ingress Host", ing.Hostname)
+			}
+		}
+		sel := make([]string, 0, len(obj.Spec.Selector))
+		for k, v := range obj.Spec.Selector {
+			sel = append(sel, k+"="+v)
+		}
+		if len(sel) > 0 {
+			w("Selector", strings.Join(sel, ","))
+		}
+		section("Ports:")
+		for _, p := range obj.Spec.Ports {
+			fmt.Fprintf(&b, "  %s %d/%s → %s\n", p.Name, p.Port, p.Protocol, p.TargetPort.String())
+		}
+
+	case "Ingress":
+		obj, err := clientset.NetworkingV1().Ingresses(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get ingress: %w", err)
+		}
+		w("Name", obj.Name)
+		w("Namespace", obj.Namespace)
+		w("Created", obj.CreationTimestamp.String())
+		writeLabels(obj.Labels)
+		writeAnnotations(obj.Annotations)
+		if obj.Spec.IngressClassName != nil {
+			w("Class", *obj.Spec.IngressClassName)
+		}
+		section("Rules:")
+		for _, rule := range obj.Spec.Rules {
+			host := rule.Host
+			if host == "" {
+				host = "*"
+			}
+			fmt.Fprintf(&b, "  Host: %s\n", host)
+			if rule.HTTP != nil {
+				for _, path := range rule.HTTP.Paths {
+					backend := ""
+					if path.Backend.Service != nil {
+						backend = path.Backend.Service.Name
+						if path.Backend.Service.Port.Number != 0 {
+							backend += fmt.Sprintf(":%d", path.Backend.Service.Port.Number)
+						} else if path.Backend.Service.Port.Name != "" {
+							backend += ":" + path.Backend.Service.Port.Name
+						}
+					}
+					fmt.Fprintf(&b, "    %s → %s\n", path.Path, backend)
+				}
+			}
+		}
+
+	default:
+		return "", fmt.Errorf("unsupported kind: %s", kind)
+	}
+
+	// Append recent events for this resource.
+	events, err := clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=%s", name, kind),
+	})
+	if err == nil && len(events.Items) > 0 {
+		section("Events:")
+		// Show last 10 events.
+		items := events.Items
+		if len(items) > 10 {
+			items = items[len(items)-10:]
+		}
+		for _, ev := range items {
+			age := time.Since(ev.LastTimestamp.Time)
+			ageStr := ""
+			if age < time.Minute {
+				ageStr = fmt.Sprintf("%ds", int(age.Seconds()))
+			} else if age < time.Hour {
+				ageStr = fmt.Sprintf("%dm", int(age.Minutes()))
+			} else {
+				ageStr = fmt.Sprintf("%dh", int(age.Hours()))
+			}
+			fmt.Fprintf(&b, "  %-6s %-8s %s: %s\n", ageStr, ev.Type, ev.Reason, ev.Message)
+		}
+	}
+
+	return b.String(), nil
 }

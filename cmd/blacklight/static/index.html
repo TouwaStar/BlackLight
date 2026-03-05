@@ -158,6 +158,22 @@
     }
     #termTitle { font-size: 0.75rem; color: #e6edf3; font-weight: 600; }
     #termContainer { flex: 1; padding: 2px; }
+    #descPanel {
+      display: none; flex-shrink: 0; height: 35vh;
+      background: #0d1117; border-top: 1px solid #30363d;
+      flex-direction: column;
+    }
+    #descHeader {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.3rem 0.75rem; background: #161b22;
+      border-bottom: 1px solid #30363d; flex-shrink: 0;
+    }
+    #descTitle { font-size: 0.75rem; color: #e6edf3; font-weight: 600; }
+    #descContent {
+      flex: 1; overflow-y: auto; padding: 0.5rem 0.75rem;
+      font-size: 0.7rem; line-height: 1.5; white-space: pre-wrap;
+      word-break: break-all; color: #c9d1d9; margin: 0;
+    }
     #globalLogSearch {
       font-family: inherit; font-size: 0.7rem;
       background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
@@ -240,8 +256,16 @@
   </div>
   <div id="tooltip"></div>
   <div id="contextMenu">
-    <div class="ctx-item" onclick="logsFromMenu()">Logs</div>
-    <div class="ctx-item" onclick="shellFromMenu()">Shell</div>
+    <div class="ctx-item" id="ctxLogs" onclick="logsFromMenu()">Logs</div>
+    <div class="ctx-item" id="ctxShell" onclick="shellFromMenu()">Shell</div>
+    <div class="ctx-item" onclick="describeFromMenu()">Describe</div>
+  </div>
+  <div id="descPanel" style="display:none">
+    <div id="descHeader">
+      <span id="descTitle"></span>
+      <button class="log-btn" onclick="closeDescribe()">Close</button>
+    </div>
+    <pre id="descContent"></pre>
   </div>
 
   <script>
@@ -570,6 +594,7 @@
         elements.push({ data: {
           id: n.id, label: n.name, kind: n.kind, namespace: n.namespace,
           purpose: n.purpose || '', fullLabel: n.display_name,
+          meta: n.meta || {},
         }});
       }
       for (let i = 0; i < (graph.edges || []).length; i++) {
@@ -649,6 +674,36 @@
         const d = node.data();
         let html = `<strong>${d.fullLabel}</strong><br>Kind: ${d.kind}`;
         if (d.purpose) html += `<br>Purpose: ${d.purpose}`;
+
+        // Show resource-specific metadata.
+        const m = d.meta || {};
+        if (d.kind === 'Deployment' || d.kind === 'StatefulSet') {
+          html += `<br>Replicas: ${m.readyReplicas ?? 0}/${m.replicas ?? 0} ready`;
+          if (m.strategy) html += `<br>Strategy: ${m.strategy}`;
+        } else if (d.kind === 'DaemonSet') {
+          html += `<br>Nodes: ${m.ready ?? 0}/${m.desired ?? 0} ready`;
+        } else if (d.kind === 'CronJob') {
+          if (m.schedule) html += `<br>Schedule: ${m.schedule}`;
+          if (m.lastSchedule) html += `<br>Last run: ${timeAgo(m.lastSchedule)}`;
+        } else if (d.kind === 'Job') {
+          if (m.succeeded) html += `<br>Succeeded: ${m.succeeded}`;
+          if (m.failed) html += `<br><span style="color:#f85149">Failed: ${m.failed}</span>`;
+        } else if (d.kind === 'Service') {
+          if (m.type) html += `<br>Type: ${m.type}`;
+          if (m.clusterIP && m.clusterIP !== 'None') html += `<br>ClusterIP: ${m.clusterIP}`;
+          if (m.ports && m.ports.length) html += `<br>Ports: ${m.ports.join(', ')}`;
+        } else if (d.kind === 'Ingress') {
+          if (m.class) html += `<br>Class: ${m.class}`;
+          if (m.hosts && m.hosts.length) html += `<br>Hosts: ${m.hosts.join(', ')}`;
+        }
+        if (m.images && m.images.length) {
+          for (const img of m.images) {
+            // Show short image name (strip registry prefix if long).
+            const short = img.includes('/') && img.length > 50 ? '...' + img.slice(img.lastIndexOf('/')) : img;
+            html += `<br><span style="color:#79c0ff">${short}</span>`;
+          }
+        }
+
         const s = nodeStats.get(node.id());
         if (s) {
           html += `<br>First seen: ${timeAgo(s.first_seen)}`;
@@ -847,9 +902,11 @@
     function showContextMenu(evt) {
       const node = evt.target;
       const kind = node.data('kind');
-      // Only workload kinds have pods to stream logs from.
-      if (!['Deployment', 'StatefulSet', 'DaemonSet', 'Job'].includes(kind)) return;
       ctxNode = node;
+      // Show Logs/Shell only for workload kinds that have pods.
+      const hasPods = ['Deployment', 'StatefulSet', 'DaemonSet', 'Job'].includes(kind);
+      document.getElementById('ctxLogs').style.display = hasPods ? '' : 'none';
+      document.getElementById('ctxShell').style.display = hasPods ? '' : 'none';
       const pos = evt.originalEvent;
       ctxMenu.style.left = pos.clientX + 'px';
       ctxMenu.style.top = pos.clientY + 'px';
@@ -1119,6 +1176,49 @@
       termFit = null;
       termContainer.innerHTML = '';
       termPanel.style.display = 'none';
+      if (cy) cy.resize();
+    }
+
+    // --- Describe panel ---
+    const descPanel = document.getElementById('descPanel');
+    const descTitle = document.getElementById('descTitle');
+    const descContent = document.getElementById('descContent');
+
+    function describeFromMenu() {
+      if (!ctxNode) return;
+      const d = ctxNode.data();
+      openDescribe(d.kind, d.namespace, d.label);
+      hideContextMenu();
+    }
+
+    function openDescribe(kind, namespace, name) {
+      closeLogs();
+      closeShell();
+      closeDescribe();
+
+      descTitle.textContent = 'Describe: ' + kind + '/' + namespace + '/' + name;
+      descContent.textContent = 'Loading...';
+      descPanel.style.display = 'flex';
+      if (cy) cy.resize();
+
+      fetch('/api/describe?kind=' + encodeURIComponent(kind) +
+            '&namespace=' + encodeURIComponent(namespace) +
+            '&name=' + encodeURIComponent(name))
+        .then(resp => {
+          if (!resp.ok) return resp.text().then(t => { throw new Error(t); });
+          return resp.text();
+        })
+        .then(text => {
+          descContent.textContent = text;
+        })
+        .catch(err => {
+          descContent.textContent = 'Error: ' + err.message;
+        });
+    }
+
+    function closeDescribe() {
+      descPanel.style.display = 'none';
+      descContent.textContent = '';
       if (cy) cy.resize();
     }
 
