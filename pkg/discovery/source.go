@@ -111,7 +111,7 @@ func isTestFile(path string) bool {
 }
 
 // callerFromPath extracts the top-level directory from a relative path.
-// "customers/robots/robots.go" → "customers"
+// "myapp/handlers/handlers.go" → "myapp"
 func callerFromPath(relPath string) string {
 	parts := strings.SplitN(filepath.ToSlash(relPath), "/", 2)
 	if len(parts) < 2 {

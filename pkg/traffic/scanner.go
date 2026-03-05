@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -47,17 +48,44 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 	// Build IP lookup tables.
 	serviceClusterIPs := make(map[string]string) // ClusterIP → node ID
 	podIPs := make(map[string]string)            // PodIP → workload node ID
+	knownIPs := make(map[string]bool)             // all cluster-internal IPs (nodes, system pods)
 	workloadPods := make(map[string]podRef)       // workload node ID → one pod
 
-	for _, ns := range nsList {
-		svcs, err := s.clientset.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			continue
+	// Collect node IPs (kubelet health checks, kube-proxy come from these).
+	nodes, err := s.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for i := range nodes.Items {
+			for _, addr := range nodes.Items[i].Status.Addresses {
+				knownIPs[addr.Address] = true
+			}
 		}
-		for i := range svcs.Items {
-			svc := &svcs.Items[i]
-			if svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
-				serviceClusterIPs[svc.Spec.ClusterIP] = model.NodeID("Service", ns, svc.Name)
+	}
+
+	// Collect services and pods across all namespaces (including system) for IP tracking.
+	allNamespaces, _ := s.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	allNsList := nsList
+	if allNamespaces != nil {
+		seen := make(map[string]bool)
+		for _, ns := range nsList {
+			seen[ns] = true
+		}
+		for i := range allNamespaces.Items {
+			ns := allNamespaces.Items[i].Name
+			if !seen[ns] {
+				allNsList = append(allNsList, ns)
+			}
+		}
+	}
+
+	for _, ns := range allNsList {
+		svcs, err := s.clientset.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
+		if err == nil {
+			for i := range svcs.Items {
+				svc := &svcs.Items[i]
+				if svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
+					serviceClusterIPs[svc.Spec.ClusterIP] = model.NodeID("Service", ns, svc.Name)
+					knownIPs[svc.Spec.ClusterIP] = true
+				}
 			}
 		}
 
@@ -72,15 +100,19 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 			if pod.Status.PodIP == "" {
 				continue
 			}
+			knownIPs[pod.Status.PodIP] = true
 			ownerKind, ownerName := workloadOwnerFromPod(pod)
 			if ownerKind == "" {
 				continue
 			}
 			wid := model.NodeID(ownerKind, ns, ownerName)
 			podIPs[pod.Status.PodIP] = wid
-			if _, exists := workloadPods[wid]; !exists {
-				cn := pickRunningContainer(pod)
-				workloadPods[wid] = podRef{namespace: ns, name: pod.Name, container: cn}
+			// Only track pods in scanned namespaces for exec.
+			if !systemNamespaces[ns] {
+				if _, exists := workloadPods[wid]; !exists {
+					cn := pickRunningContainer(pod)
+					workloadPods[wid] = podRef{namespace: ns, name: pod.Name, container: cn}
+				}
 			}
 		}
 	}
@@ -89,7 +121,8 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 	type connKey struct{ source, target string }
 	connCounts := make(map[connKey]int)
 	errCounts := make(map[connKey]int)
-	externalCounts := make(map[string]int) // workload ID → external inbound conn count
+	type extKey struct{ wid, ip string }
+	extPerIP := make(map[extKey]int) // workload+IP → count
 
 	for wid, pr := range workloadPods {
 		execCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -117,9 +150,9 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 				} else {
 					connCounts[key]++
 				}
-			} else if !e.IsError {
-				// Remote IP is not a known pod or service — external inbound traffic.
-				externalCounts[wid]++
+			} else if !e.IsError && !knownIPs[remoteIP] && !isPrivateIP(e.RemoteIP) {
+				// Remote IP is not any known cluster IP and not RFC 1918 — truly external.
+				extPerIP[extKey{wid, remoteIP}]++
 			}
 		}
 	}
@@ -141,11 +174,43 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 			ErrorCount:     errCounts[key],
 		})
 	}
-	for wid, count := range externalCounts {
-		snap.External = append(snap.External, model.ExternalTraffic{
-			NodeID:    wid,
-			ConnCount: count,
-		})
+	// Classify external IPs as cloud infra or truly external via reverse DNS.
+	uniqueIPs := make(map[string]bool)
+	for ek := range extPerIP {
+		uniqueIPs[ek.ip] = true
+	}
+	cloudIPs := make(map[string]bool)
+	for ip := range uniqueIPs {
+		if isCloudIP(ip) {
+			cloudIPs[ip] = true
+		}
+	}
+
+	// Aggregate per workload, splitting cloud vs external.
+	type ipBucket struct {
+		cloud    map[string]int
+		external map[string]int
+	}
+	byWID := make(map[string]*ipBucket)
+	for ek, count := range extPerIP {
+		b := byWID[ek.wid]
+		if b == nil {
+			b = &ipBucket{cloud: make(map[string]int), external: make(map[string]int)}
+			byWID[ek.wid] = b
+		}
+		if cloudIPs[ek.ip] {
+			b.cloud[ek.ip] += count
+		} else {
+			b.external[ek.ip] += count
+		}
+	}
+	for wid, b := range byWID {
+		if len(b.external) > 0 {
+			snap.External = append(snap.External, buildExtTraffic(wid, b.external))
+		}
+		if len(b.cloud) > 0 {
+			snap.Cloud = append(snap.Cloud, buildExtTraffic(wid, b.cloud))
+		}
 	}
 	return snap, nil
 }
@@ -255,6 +320,56 @@ func parseHexAddr(s string) (net.IP, uint16, bool) {
 		return nil, 0, false
 	}
 	return ip, uint16(port64), true
+}
+
+// isPrivateIP returns true for RFC 1918, CGNAT, link-local, and loopback addresses.
+func isPrivateIP(ip net.IP) bool {
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
+	}
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsPrivate()
+}
+
+// isCloudIP checks reverse DNS to detect cloud provider infrastructure IPs.
+func isCloudIP(ip string) bool {
+	names, err := net.LookupAddr(ip)
+	if err != nil || len(names) == 0 {
+		return false
+	}
+	host := strings.ToLower(names[0])
+	for _, suffix := range cloudDNSSuffixes {
+		if strings.Contains(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+var cloudDNSSuffixes = []string{
+	"amazonaws.com",
+	"azure.com",
+	"cloudapp.azure.com",
+	"googleusercontent.com",
+	"cloud.google.com",
+}
+
+// buildExtTraffic aggregates an IP→count map into an ExternalTraffic entry.
+func buildExtTraffic(wid string, ips map[string]int) model.ExternalTraffic {
+	total := 0
+	var topIPs []model.IPCount
+	for ip, count := range ips {
+		total += count
+		topIPs = append(topIPs, model.IPCount{IP: ip, Count: count})
+	}
+	sortIPCounts(topIPs)
+	if len(topIPs) > 5 {
+		topIPs = topIPs[:5]
+	}
+	return model.ExternalTraffic{NodeID: wid, ConnCount: total, TopIPs: topIPs}
+}
+
+func sortIPCounts(s []model.IPCount) {
+	sort.Slice(s, func(i, j int) bool { return s[i].Count > s[j].Count })
 }
 
 // pickRunningContainer returns the name of a running container in the pod.

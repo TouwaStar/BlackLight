@@ -332,15 +332,21 @@ func mergeSnapshots(scans []timedSnapshot) *model.TrafficSnapshot {
 			}
 		}
 	}
-	// Merge external traffic: take max per workload.
-	extAggr := make(map[string]int)
+	// Merge external and cloud traffic: take max per workload, preserving TopIPs.
+	extAggr := make(map[string]model.ExternalTraffic)
+	cloudAggr := make(map[string]model.ExternalTraffic)
 	for _, ts := range scans {
 		if ts.snap == nil {
 			continue
 		}
 		for _, ext := range ts.snap.External {
-			if ext.ConnCount > extAggr[ext.NodeID] {
-				extAggr[ext.NodeID] = ext.ConnCount
+			if existing, ok := extAggr[ext.NodeID]; !ok || ext.ConnCount > existing.ConnCount {
+				extAggr[ext.NodeID] = ext
+			}
+		}
+		for _, cl := range ts.snap.Cloud {
+			if existing, ok := cloudAggr[cl.NodeID]; !ok || cl.ConnCount > existing.ConnCount {
+				cloudAggr[cl.NodeID] = cl
 			}
 		}
 	}
@@ -349,8 +355,11 @@ func mergeSnapshots(scans []timedSnapshot) *model.TrafficSnapshot {
 	for _, c := range aggr {
 		result.Connections = append(result.Connections, *c)
 	}
-	for id, count := range extAggr {
-		result.External = append(result.External, model.ExternalTraffic{NodeID: id, ConnCount: count})
+	for _, ext := range extAggr {
+		result.External = append(result.External, ext)
+	}
+	for _, cl := range cloudAggr {
+		result.Cloud = append(result.Cloud, cl)
 	}
 	return result
 }
@@ -393,13 +402,28 @@ func translateTraffic(snap *model.TrafficSnapshot, idMap map[string]string) *mod
 	for _, c := range aggr {
 		result.Connections = append(result.Connections, *c)
 	}
-	// Translate external traffic node IDs.
+	// Translate external and cloud traffic node IDs.
 	for _, ext := range snap.External {
 		id := ext.NodeID
 		if mapped, ok := idMap[id]; ok {
 			id = mapped
 		}
-		result.External = append(result.External, model.ExternalTraffic{NodeID: id, ConnCount: ext.ConnCount})
+		result.External = append(result.External, model.ExternalTraffic{
+			NodeID:    id,
+			ConnCount: ext.ConnCount,
+			TopIPs:    ext.TopIPs,
+		})
+	}
+	for _, cl := range snap.Cloud {
+		id := cl.NodeID
+		if mapped, ok := idMap[id]; ok {
+			id = mapped
+		}
+		result.Cloud = append(result.Cloud, model.ExternalTraffic{
+			NodeID:    id,
+			ConnCount: cl.ConnCount,
+			TopIPs:    cl.TopIPs,
+		})
 	}
 	return result
 }

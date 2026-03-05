@@ -509,6 +509,18 @@
         const extConns = node.data('externalConns') || 0;
         if (extConns > 0) {
           html += `<br><strong style="color:#f0883e">External traffic: ${extConns} conn</strong>`;
+          const topIPs = node.data('externalIPs') || [];
+          for (const ip of topIPs) {
+            html += `<br><span style="color:#f0883e">&nbsp;&nbsp;${ip.ip}: ${ip.count} conn</span>`;
+          }
+        }
+        const cloudConns = node.data('cloudConns') || 0;
+        if (cloudConns > 0) {
+          html += `<br><span style="color:#8b949e">Cloud infra: ${cloudConns} conn</span>`;
+          const cloudIPs = node.data('cloudIPs') || [];
+          for (const ip of cloudIPs) {
+            html += `<br><span style="color:#8b949e">&nbsp;&nbsp;${ip.ip}: ${ip.count} conn</span>`;
+          }
         }
 
         // Inbound/outbound traffic from connected edges.
@@ -635,16 +647,30 @@
       // Mark nodes receiving external (non-cluster) traffic.
       const extMap = new Map();
       for (const ext of (snapshot.external || [])) {
-        extMap.set(ext.node_id, ext.conn_count);
+        extMap.set(ext.node_id, { count: ext.conn_count, ips: ext.top_ips || [] });
+      }
+      const cloudMap = new Map();
+      for (const cl of (snapshot.cloud || [])) {
+        cloudMap.set(cl.node_id, { count: cl.conn_count, ips: cl.top_ips || [] });
       }
       cy.nodes().forEach(node => {
-        const extConns = extMap.get(node.id());
-        if (extConns && extConns > 0) {
-          node.data('externalConns', extConns);
+        const ext = extMap.get(node.id());
+        if (ext && ext.count > 0) {
+          node.data('externalConns', ext.count);
+          node.data('externalIPs', ext.ips);
           node.addClass('external-traffic');
         } else {
           node.data('externalConns', 0);
+          node.data('externalIPs', []);
           node.removeClass('external-traffic');
+        }
+        const cl = cloudMap.get(node.id());
+        if (cl && cl.count > 0) {
+          node.data('cloudConns', cl.count);
+          node.data('cloudIPs', cl.ips);
+        } else {
+          node.data('cloudConns', 0);
+          node.data('cloudIPs', []);
         }
       });
 
