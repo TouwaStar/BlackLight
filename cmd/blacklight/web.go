@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -348,6 +349,89 @@ func serveWeb(mgr *Manager, port int) error {
 		if err != nil {
 			ws.WriteMessage(websocket.TextMessage, []byte("\r\n[exec ended: "+err.Error()+"]\r\n"))
 		}
+	})
+
+	http.HandleFunc("/api/search-logs", func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("q")
+		if query == "" {
+			http.Error(w, "q parameter required", http.StatusBadRequest)
+			return
+		}
+		tailLines := int64(200)
+		if t := r.URL.Query().Get("tail"); t != "" {
+			if v, err := strconv.ParseInt(t, 10, 64); err == nil && v > 0 {
+				tailLines = v
+			}
+		}
+
+		g := mgr.Graph()
+		if g == nil {
+			http.Error(w, "graph not available", http.StatusServiceUnavailable)
+			return
+		}
+
+		d := mgr.Discoverer()
+		type result struct {
+			NodeID string `json:"node_id"`
+			Matches int   `json:"matches"`
+		}
+		var (
+			mu      sync.Mutex
+			results []result
+			wg      sync.WaitGroup
+		)
+
+		// Limit concurrency to avoid overwhelming the API server.
+		sem := make(chan struct{}, 5)
+
+		for _, node := range g.Nodes {
+			switch node.Kind {
+			case "Deployment", "StatefulSet", "DaemonSet", "Job":
+			default:
+				continue
+			}
+			wg.Add(1)
+			go func(kind, namespace, name, nodeID string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				podName, container, err := findPodForWorkload(r.Context(), d.Clientset(), kind, namespace, name)
+				if err != nil {
+					return
+				}
+
+				stream, err := d.Clientset().CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+					TailLines: &tailLines,
+					Container: container,
+				}).Stream(r.Context())
+				if err != nil {
+					return
+				}
+				defer stream.Close()
+
+				count := 0
+				scanner := bufio.NewScanner(stream)
+				queryLower := strings.ToLower(query)
+				for scanner.Scan() {
+					if strings.Contains(strings.ToLower(scanner.Text()), queryLower) {
+						count++
+					}
+				}
+				if count > 0 {
+					mu.Lock()
+					results = append(results, result{NodeID: nodeID, Matches: count})
+					mu.Unlock()
+				}
+			}(node.Kind, node.Namespace, node.Name, node.ID)
+		}
+		wg.Wait()
+
+		if results == nil {
+			results = []result{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(results)
 	})
 
 	addr := ":" + strconv.Itoa(port)

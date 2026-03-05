@@ -158,6 +158,24 @@
     }
     #termTitle { font-size: 0.75rem; color: #e6edf3; font-weight: 600; }
     #termContainer { flex: 1; padding: 2px; }
+    #globalLogSearch {
+      font-family: inherit; font-size: 0.7rem;
+      background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+      border-radius: 4px; padding: 0.25rem 0.5rem; width: 200px;
+      outline: none; transition: border-color 0.15s;
+    }
+    #globalLogSearch:focus { border-color: #a371f7; }
+    #globalLogSearch::placeholder { color: #484f58; }
+    #globalLogSearch.searching { border-color: #d29922; }
+    #globalSearchStatus {
+      font-size: 0.65rem; color: #8b949e; white-space: nowrap;
+    }
+    #globalSearchClear {
+      font-family: inherit; font-size: 0.65rem; background: transparent;
+      color: #8b949e; border: 1px solid #30363d; border-radius: 4px;
+      padding: 0.1rem 0.4rem; cursor: pointer; display: none;
+    }
+    #globalSearchClear:hover { border-color: #f85149; color: #f85149; }
   </style>
 </head>
 <body>
@@ -181,6 +199,9 @@
       <select id="contextSelect" class="config-select" onchange="onConfigChange()"></select>
       <select id="namespaceSelect" class="config-select" onchange="onConfigChange()"></select>
       <input id="searchBox" type="text" placeholder="Search services..." oninput="onSearch(this.value)">
+      <input id="globalLogSearch" type="text" placeholder="Search all logs... (Enter)" onkeydown="if(event.key==='Enter')globalLogSearchRun()">
+      <span id="globalSearchStatus"></span>
+      <button id="globalSearchClear" onclick="globalLogSearchClear()">Clear</button>
       <button id="autoArrange" class="filter-btn active" onclick="toggleAutoArrange()">Auto arrange: ON</button>
       <button id="deadFilter" class="filter-btn" onclick="toggleDeadFilter()">Show dead services</button>
       <span class="hint">scroll to zoom &middot; drag to pan &middot; click node to highlight</span>
@@ -321,6 +342,13 @@
         style: {
           'background-opacity': 0.4, 'border-style': 'dashed',
           'border-width': 2, 'border-color': '#484f58',
+        }
+      },
+      {
+        selector: '.log-match',
+        style: {
+          'border-width': 3, 'border-color': '#a371f7',
+          'border-opacity': 1, 'z-index': 20,
         }
       },
     ];
@@ -1087,6 +1115,91 @@
       termContainer.innerHTML = '';
       termPanel.style.display = 'none';
       if (cy) cy.resize();
+    }
+
+    // --- Global log search ---
+    const globalLogSearchInput = document.getElementById('globalLogSearch');
+    const globalSearchStatus = document.getElementById('globalSearchStatus');
+    const globalSearchClearBtn = document.getElementById('globalSearchClear');
+    let globalSearchAbort = null;
+    let globalSearchTimer = null;
+
+    function globalLogSearchRun() {
+      // Debounce: ignore rapid Enter presses within 2s of a running search.
+      if (globalSearchTimer) return;
+      const query = globalLogSearchInput.value.trim();
+      if (!query) return;
+      if (globalSearchAbort) globalSearchAbort.abort();
+      globalSearchAbort = new AbortController();
+      globalSearchTimer = setTimeout(() => { globalSearchTimer = null; }, 2000);
+
+      globalLogSearchInput.classList.add('searching');
+      globalSearchStatus.textContent = 'searching...';
+      globalSearchStatus.style.color = '#d29922';
+      globalSearchClearBtn.style.display = 'none';
+
+      // Clear previous highlights.
+      if (cy) cy.nodes().removeClass('log-match dimmed');
+
+      fetch('/api/search-logs?q=' + encodeURIComponent(query), { signal: globalSearchAbort.signal })
+        .then(r => {
+          if (!r.ok) return r.text().then(t => { throw new Error(t); });
+          return r.json();
+        })
+        .then(results => {
+          globalLogSearchInput.classList.remove('searching');
+          if (!results || results.length === 0) {
+            globalSearchStatus.textContent = 'no matches';
+            globalSearchStatus.style.color = '#8b949e';
+            globalSearchClearBtn.style.display = 'inline-block';
+            return;
+          }
+          const matchedIds = new Set(results.map(r => r.node_id));
+          const totalMatches = results.reduce((sum, r) => sum + r.matches, 0);
+          globalSearchStatus.textContent = totalMatches + ' hit' + (totalMatches !== 1 ? 's' : '') + ' in ' + results.length + ' service' + (results.length !== 1 ? 's' : '');
+          globalSearchStatus.style.color = '#a371f7';
+          globalSearchClearBtn.style.display = 'inline-block';
+
+          if (cy) {
+            cy.elements().removeClass('highlighted');
+            cy.nodes().forEach(node => {
+              if (matchedIds.has(node.id())) {
+                node.addClass('log-match');
+                node.removeClass('dimmed');
+              } else {
+                node.addClass('dimmed');
+                node.removeClass('log-match');
+              }
+            });
+            cy.edges().forEach(edge => {
+              const srcMatch = matchedIds.has(edge.source().id());
+              const tgtMatch = matchedIds.has(edge.target().id());
+              if (srcMatch || tgtMatch) {
+                edge.removeClass('dimmed');
+              } else {
+                edge.addClass('dimmed');
+              }
+            });
+          }
+        })
+        .catch(err => {
+          globalLogSearchInput.classList.remove('searching');
+          if (err.name === 'AbortError') return;
+          globalSearchStatus.textContent = 'error: ' + err.message;
+          globalSearchStatus.style.color = '#f85149';
+        });
+    }
+
+    function globalLogSearchClear() {
+      globalLogSearchInput.value = '';
+      globalSearchStatus.textContent = '';
+      globalSearchClearBtn.style.display = 'none';
+      if (globalSearchAbort) { globalSearchAbort.abort(); globalSearchAbort = null; }
+      if (globalSearchTimer) { clearTimeout(globalSearchTimer); globalSearchTimer = null; }
+      if (cy) {
+        cy.nodes().removeClass('log-match dimmed');
+        cy.edges().removeClass('dimmed');
+      }
     }
 
     // --- Config selectors (context + namespace) ---
