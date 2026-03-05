@@ -59,7 +59,7 @@
     .filter-btn:hover { border-color: #58a6ff; color: #58a6ff; }
     .filter-btn.active { background: #388bfd22; border-color: #58a6ff; color: #58a6ff; }
     .filter-btn.active-warn { background: #f8514922; border-color: #f85149; color: #f85149; }
-    #cy { flex: 1; }
+    #cy { flex: 1; min-height: 200px; }
     #tooltip {
       display: none;
       position: fixed;
@@ -81,6 +81,39 @@
     .legend-item { display: flex; align-items: center; gap: 0.3rem; }
     .legend-dot {
       width: 10px; height: 10px; border-radius: 2px; display: inline-block;
+    }
+    #contextMenu {
+      display: none; position: fixed; z-index: 200;
+      background: #1c2129; border: 1px solid #30363d; border-radius: 6px;
+      padding: 0.25rem 0; min-width: 140px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    }
+    .ctx-item {
+      padding: 0.35rem 0.75rem; font-size: 0.75rem; cursor: pointer;
+      color: #c9d1d9; display: flex; align-items: center; gap: 0.4rem;
+    }
+    .ctx-item:hover { background: #388bfd33; color: #e6edf3; }
+    #logPanel {
+      display: none; flex-shrink: 0; height: 35vh;
+      background: #0d1117; border-top: 1px solid #30363d;
+      flex-direction: column;
+    }
+    #logHeader {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.3rem 0.75rem; background: #161b22;
+      border-bottom: 1px solid #30363d; flex-shrink: 0;
+    }
+    #logTitle { font-size: 0.75rem; color: #e6edf3; font-weight: 600; }
+    .log-btn {
+      font-family: inherit; font-size: 0.7rem; background: transparent;
+      color: #8b949e; border: 1px solid #30363d; border-radius: 4px;
+      padding: 0.15rem 0.5rem; cursor: pointer; margin-left: 0.4rem;
+    }
+    .log-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+    #logContent {
+      flex: 1; overflow-y: auto; padding: 0.5rem 0.75rem;
+      font-size: 0.7rem; line-height: 1.5; white-space: pre-wrap;
+      word-break: break-all; color: #8b949e; margin: 0;
     }
   </style>
 </head>
@@ -113,7 +146,20 @@
     </div>
   </header>
   <div id="cy"></div>
+  <div id="logPanel">
+    <div id="logHeader">
+      <span id="logTitle"></span>
+      <div>
+        <button class="log-btn" onclick="clearLogs()">Clear</button>
+        <button class="log-btn" onclick="closeLogs()">Close</button>
+      </div>
+    </div>
+    <pre id="logContent"></pre>
+  </div>
   <div id="tooltip"></div>
+  <div id="contextMenu">
+    <div class="ctx-item" onclick="logsFromMenu()">Logs</div>
+  </div>
 
   <script>
     const KIND_COLORS = {
@@ -585,6 +631,11 @@
       });
       cy.on('mouseout', 'node, edge', () => { tip.style.display = 'none'; });
 
+      // Right-click context menu.
+      cy.on('cxttap', 'node', showContextMenu);
+      cy.container().addEventListener('contextmenu', e => e.preventDefault());
+      cy.on('pan zoom', hideContextMenu);
+
       fetchStats();
       if (searchQuery) onSearch(searchQuery);
     }
@@ -684,6 +735,99 @@
       });
 
       startPulse();
+    }
+
+    // --- Context menu ---
+    const ctxMenu = document.getElementById('contextMenu');
+    let ctxNode = null;
+
+    function hideContextMenu() {
+      ctxMenu.style.display = 'none';
+      ctxNode = null;
+    }
+
+    document.addEventListener('click', hideContextMenu);
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') hideContextMenu(); });
+
+    function showContextMenu(evt) {
+      const node = evt.target;
+      const kind = node.data('kind');
+      // Only workload kinds have pods to stream logs from.
+      if (!['Deployment', 'StatefulSet', 'DaemonSet', 'Job'].includes(kind)) return;
+      ctxNode = node;
+      const pos = evt.originalEvent;
+      ctxMenu.style.left = pos.clientX + 'px';
+      ctxMenu.style.top = pos.clientY + 'px';
+      ctxMenu.style.display = 'block';
+    }
+
+    function logsFromMenu() {
+      if (!ctxNode) return;
+      const d = ctxNode.data();
+      openLogs(d.id, d.kind, d.namespace, d.label);
+      hideContextMenu();
+    }
+
+    // --- Log panel ---
+    const logPanel = document.getElementById('logPanel');
+    const logTitle = document.getElementById('logTitle');
+    const logContent = document.getElementById('logContent');
+    let logAbort = null;
+    let logAutoScroll = true;
+
+    logContent.addEventListener('scroll', () => {
+      const el = logContent;
+      logAutoScroll = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    });
+
+    function openLogs(nodeId, kind, namespace, name) {
+      // Abort previous stream.
+      if (logAbort) logAbort.abort();
+      logContent.textContent = '';
+      logTitle.textContent = 'Logs: ' + namespace + '/' + name;
+      logPanel.style.display = 'flex';
+      logAutoScroll = true;
+      if (cy) cy.resize();
+
+      logAbort = new AbortController();
+      fetch('/api/logs?kind=' + encodeURIComponent(kind) +
+            '&namespace=' + encodeURIComponent(namespace) +
+            '&name=' + encodeURIComponent(name) +
+            '&tail=200', { signal: logAbort.signal })
+        .then(resp => {
+          if (!resp.ok) return resp.text().then(t => { throw new Error(t); });
+          const pod = resp.headers.get('X-Pod-Name') || '';
+          if (pod) logTitle.textContent = 'Logs: ' + namespace + '/' + name + ' (' + pod + ')';
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          function read() {
+            reader.read().then(({ done, value }) => {
+              if (done) {
+                logContent.textContent += '\n[stream ended]\n';
+                return;
+              }
+              logContent.textContent += decoder.decode(value, { stream: true });
+              if (logAutoScroll) logContent.scrollTop = logContent.scrollHeight;
+              read();
+            }).catch(() => {});
+          }
+          read();
+        })
+        .catch(err => {
+          if (err.name === 'AbortError') return;
+          logContent.textContent += '\n[error: ' + err.message + ']\n';
+        });
+    }
+
+    function closeLogs() {
+      if (logAbort) logAbort.abort();
+      logAbort = null;
+      logPanel.style.display = 'none';
+      if (cy) cy.resize();
+    }
+
+    function clearLogs() {
+      logContent.textContent = '';
     }
 
     // --- Config selectors (context + namespace) ---

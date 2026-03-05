@@ -25,5 +25,13 @@ Thumbs.db
 # Go
 vendor/
 
+# Sensitive files
+*.pem
+*.key
+*.env
+*.env.*
+kubeconfig
+credentials.json
+
 # Claude Code
 .claude/
