@@ -43,6 +43,13 @@
     }
     #searchBox:focus { border-color: #58a6ff; }
     #searchBox::placeholder { color: #484f58; }
+    .config-select {
+      font-family: inherit; font-size: 0.7rem;
+      background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+      border-radius: 4px; padding: 0.25rem 0.5rem;
+      outline: none; cursor: pointer; transition: border-color 0.15s;
+    }
+    .config-select:focus { border-color: #58a6ff; }
     .filter-btn {
       font-family: inherit; font-size: 0.7rem; font-weight: 600;
       background: transparent; color: #8b949e; border: 1px solid #30363d;
@@ -95,6 +102,8 @@
     </div>
     <div class="controls">
       <span id="status" style="color:#d29922">connecting...</span>
+      <select id="contextSelect" class="config-select" onchange="onConfigChange()"></select>
+      <select id="namespaceSelect" class="config-select" onchange="onConfigChange()"></select>
       <input id="searchBox" type="text" placeholder="Search services..." oninput="onSearch(this.value)">
       <button id="autoArrange" class="filter-btn active" onclick="toggleAutoArrange()">Auto arrange: ON</button>
       <button id="deadFilter" class="filter-btn" onclick="toggleDeadFilter()">Show dead services</button>
@@ -677,6 +686,73 @@
       startPulse();
     }
 
+    // --- Config selectors (context + namespace) ---
+    const contextSelect = document.getElementById('contextSelect');
+    const namespaceSelect = document.getElementById('namespaceSelect');
+
+    let suppressConfigChange = false; // prevent onchange during programmatic population
+
+    function populateSelect(select, items, current) {
+      suppressConfigChange = true;
+      select.innerHTML = '';
+      for (const item of items) {
+        const opt = document.createElement('option');
+        opt.value = item.value;
+        opt.textContent = item.label;
+        if (item.value === current) opt.selected = true;
+        select.appendChild(opt);
+      }
+      suppressConfigChange = false;
+    }
+
+    function fetchContexts() {
+      return fetch('/api/contexts').then(r => r.json()).then(data => {
+        const items = (data.contexts || []).sort().map(c => ({ value: c, label: c }));
+        populateSelect(contextSelect, items, data.current || '');
+      }).catch(() => {
+        populateSelect(contextSelect, [{ value: '', label: 'default' }], '');
+      });
+    }
+
+    function fetchNamespaces() {
+      return fetch('/api/namespaces').then(r => r.json()).then(data => {
+        const items = [{ value: '', label: 'All namespaces' }];
+        for (const ns of (data.namespaces || []).sort()) {
+          items.push({ value: ns, label: ns });
+        }
+        populateSelect(namespaceSelect, items, data.current || '');
+      }).catch(() => {});
+    }
+
+    let awaitingReconfigure = false;
+    function onConfigChange() {
+      if (suppressConfigChange || awaitingReconfigure) return;
+      awaitingReconfigure = true;
+      const statusEl = document.getElementById('status');
+      statusEl.textContent = 'reconfiguring...';
+      statusEl.style.color = '#d29922';
+      fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          context: contextSelect.value,
+          namespace: namespaceSelect.value,
+        }),
+      }).then(r => {
+        if (!r.ok) throw new Error('reconfigure failed');
+        // Don't fetchNamespaces here — wait for graph SSE event to confirm reconfigure is done.
+      }).catch(err => {
+        console.error('reconfigure:', err);
+        statusEl.textContent = 'error';
+        statusEl.style.color = '#f85149';
+        awaitingReconfigure = false;
+      });
+    }
+
+    // Load config dropdowns on startup.
+    fetchContexts();
+    fetchNamespaces();
+
     // Load saved positions, then connect SSE.
     const statusEl = document.getElementById('status');
     let pendingGraph = null;
@@ -693,6 +769,13 @@
 
     evtSource.addEventListener('graph', function(e) {
       const graph = JSON.parse(e.data);
+      if (awaitingReconfigure) {
+        awaitingReconfigure = false;
+        statusEl.textContent = 'live';
+        statusEl.style.color = '#39d353';
+        // Namespace list may have changed (e.g. after context switch).
+        fetchNamespaces();
+      }
       if (!positionsLoaded && savedPositions.size === 0) {
         // Positions still loading, queue the graph.
         pendingGraph = graph;

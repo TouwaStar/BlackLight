@@ -1,6 +1,6 @@
 # Blacklight
 
-A **Go** tool that discovers services and workloads from your **Kubernetes** cluster, monitors **live TCP traffic** between them, and renders an interactive **service map**. Helps you understand what talks to what, spot dead services ripe for removal, and navigate complex multi-service setups.
+A **Go** tool that discovers services and workloads from your **Kubernetes** cluster, monitors **live TCP traffic** between them, and renders an interactive **service map**. Helps you understand what talks to what, spot dead services ripe for removal, detect error-state connections, and navigate complex multi-service setups.
 
 ## What it does
 
@@ -10,8 +10,11 @@ A **Go** tool that discovers services and workloads from your **Kubernetes** clu
   - Ingress resources and Traefik IngressRoute CRDs
   - Env-based references (`*_HOST`, `*_URL`, `*_SERVICE`, `*_ADDR`, `*_DB`, etc.)
 - **Monitors live traffic** by reading `/proc/net/tcp` from pods to discover active TCP connections — creates graph edges automatically from observed traffic
+- **Error detection** — flags connections in SYN_SENT or CLOSE_WAIT state as errors, shown as dashed red edges
+- **Cloud traffic classification** — identifies connections to AWS, Azure, and GCP infrastructure via reverse DNS, shown separately from external user traffic
 - **Highlights dead services** — nodes with zero observed traffic are flagged for potential removal
-- **Persists state** — layout positions and traffic-discovered edges survive restarts (SQLite)
+- **Context & namespace switching** — switch Kubernetes contexts and namespaces from the web UI without restarting
+- **Persists state** — layout positions, traffic-discovered edges, and node statistics survive restarts (SQLite)
 - **Optional source scanning** — walks local source trees to find URL-based service references
 
 ## Output formats
@@ -90,10 +93,14 @@ CLI flags override config file values.
 
 - **Live graph** — nodes and edges update in real-time via SSE
 - **Traffic density** — edge thickness scales with connection count (log-scale)
+- **Error edges** — dashed red lines for connections in error states (SYN_SENT / CLOSE_WAIT)
 - **Dead service filter** — toggle to highlight services with zero traffic
+- **Search** — filter nodes by name or label in real-time
+- **Context & namespace selectors** — switch cluster context or namespace without restarting
 - **Draggable layout** — positions persist across page reloads and restarts
 - **Auto-arrange** — toggle deterministic force-directed layout (fcose)
-- **Node details** — hover to see inbound/outbound traffic with peer names and connection counts
+- **Node details** — hover to see kind, purpose, first seen, last traffic, lifetime connections, inbound/outbound peers with counts, external/cloud traffic
+- **Export** — download the current graph as JSON or Mermaid diagram from the UI
 
 ## Edge kinds
 
@@ -116,11 +123,49 @@ metadata:
     # Also reads: servicemap/purpose, purpose, description, app.kubernetes.io/part-of
 ```
 
+## API
+
+The web UI is backed by a REST + SSE API:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/graph` | GET | Full graph (nodes + edges) as JSON |
+| `/api/mermaid` | GET | Mermaid flowchart diagram |
+| `/api/stats` | GET | Node statistics (first seen, last traffic, lifetime connections) |
+| `/api/history` | GET | Time-series connection history for an edge (`?source=...&target=...&range=24h`) |
+| `/api/positions` | GET/POST | Load or save node layout positions |
+| `/api/contexts` | GET | Available kubeconfig contexts |
+| `/api/namespaces` | GET | Available namespaces in current context |
+| `/api/config` | POST | Switch context and/or namespace (`{"context":"...","namespace":"..."}`) |
+| `/api/events` | GET | SSE stream — pushes `graph` and `traffic` events in real-time |
+
 ## Requirements
 
-- Go 1.21+ with CGO enabled (for SQLite)
-- Access to a Kubernetes cluster (kubeconfig or in-cluster)
-- Pods must have `/proc/net/tcp` readable for traffic scanning (most containers do)
+### Build
+
+- **Go 1.21+** with **CGO enabled** (required for SQLite via `go-sqlite3`)
+- A C compiler (gcc/clang) — needed by CGO
+
+### Running locally
+
+- **kubectl configured** — Blacklight reads your kubeconfig file (`~/.kube/config` or `$KUBECONFIG`) to connect to clusters. This file is created when you configure kubectl for a cluster, e.g.:
+  - AWS EKS: `aws eks update-kubeconfig --name my-cluster`
+  - GCP GKE: `gcloud container clusters get-credentials my-cluster`
+  - Azure AKS: `az aks get-credentials --resource-group myRG --name my-cluster`
+  - minikube: `minikube start`
+- Your kubeconfig user needs the following **RBAC permissions**:
+  - `get`, `list` on: namespaces, pods, services, configmaps, deployments, statefulsets, daemonsets, replicasets, jobs, cronjobs, ingresses, ingressroutes
+  - `create` on `pods/exec` (for traffic scanning via `/proc/net/tcp`)
+
+### Running in-cluster
+
+- Deploy with `kubectl apply -f deploy/` — the included manifests set up a ServiceAccount with the required ClusterRole
+- No kubeconfig needed; the pod uses its service account token automatically
+
+### Traffic scanning
+
+- Pods must have `/proc/net/tcp` readable (most containers do)
+- The scanned containers need `cat` available (standard in most base images)
 
 ## License
 

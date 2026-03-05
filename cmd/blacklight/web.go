@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/TouwaStar/BlackLight/pkg/discovery"
 	"github.com/TouwaStar/BlackLight/pkg/render"
 	"github.com/TouwaStar/BlackLight/pkg/store"
 )
@@ -114,6 +117,60 @@ func serveWeb(mgr *Manager, port int) error {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+
+	http.HandleFunc("/api/contexts", func(w http.ResponseWriter, r *http.Request) {
+		contexts, current, err := discovery.ListKubeContexts()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		active := mgr.KubeContext()
+		if active == "" {
+			active = current
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"contexts": contexts,
+			"current":  active,
+		})
+	})
+
+	http.HandleFunc("/api/namespaces", func(w http.ResponseWriter, r *http.Request) {
+		d := mgr.Discoverer()
+		nsList, err := discovery.ListNamespacesFor(r.Context(), d.Clientset())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"namespaces": nsList,
+			"current":    mgr.Namespace(),
+		})
+	})
+
+	http.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Context   string `json:"context"`
+			Namespace string `json:"namespace"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Run reconfigure in background so the POST returns immediately.
+		go func() {
+			if err := mgr.Reconfigure(context.Background(), req.Context, req.Namespace); err != nil {
+				log.Printf("reconfigure: %v", err)
+			}
+		}()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
 	http.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {

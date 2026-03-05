@@ -29,12 +29,22 @@ func (d *Discoverer) Namespace() string                { return d.namespace }
 
 // NewDiscoverer creates a discoverer from in-cluster config (when running inside K8s) or KUBECONFIG.
 func NewDiscoverer(namespace string) (*Discoverer, error) {
+	return NewDiscovererWithContext("", namespace)
+}
+
+// NewDiscovererWithContext creates a discoverer using a specific kubeconfig context.
+// Empty kubeContext uses the default context.
+func NewDiscovererWithContext(kubeContext, namespace string) (*Discoverer, error) {
 	var config *rest.Config
 	var err error
 	config, err = rest.InClusterConfig()
 	if err != nil {
 		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-		config, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, nil).ClientConfig()
+		overrides := &clientcmd.ConfigOverrides{}
+		if kubeContext != "" {
+			overrides.CurrentContext = kubeContext
+		}
+		config, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides).ClientConfig()
 		if err != nil {
 			return nil, fmt.Errorf("kube config: %w", err)
 		}
@@ -44,6 +54,33 @@ func NewDiscoverer(namespace string) (*Discoverer, error) {
 		return nil, fmt.Errorf("kubernetes client: %w", err)
 	}
 	return &Discoverer{clientset: clientset, restConfig: config, namespace: namespace}, nil
+}
+
+// ListKubeContexts returns the available kubeconfig contexts and the current default.
+func ListKubeContexts() (contexts []string, current string, err error) {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	rawConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, nil).RawConfig()
+	if err != nil {
+		return nil, "", fmt.Errorf("load kubeconfig: %w", err)
+	}
+	current = rawConfig.CurrentContext
+	for name := range rawConfig.Contexts {
+		contexts = append(contexts, name)
+	}
+	return contexts, current, nil
+}
+
+// ListNamespacesFor lists all namespace names reachable by the given discoverer.
+func ListNamespacesFor(ctx context.Context, clientset *kubernetes.Clientset) ([]string, error) {
+	list, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(list.Items))
+	for i := range list.Items {
+		names = append(names, list.Items[i].Name)
+	}
+	return names, nil
 }
 
 // Discover builds the graph from the cluster.

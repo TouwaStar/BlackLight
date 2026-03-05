@@ -22,10 +22,12 @@ const trafficWindow = 5 * time.Minute
 
 // Manager runs periodic discovery and traffic scanning in the background.
 type Manager struct {
-	discoverer *discovery.Discoverer
-	scanner    *traffic.Scanner
-	store      *store.Store
-	sourcePath string
+	discoverer  *discovery.Discoverer
+	scanner     *traffic.Scanner
+	store       *store.Store
+	sourcePath  string
+	kubeContext string // current kubeconfig context (empty = default)
+	namespace   string // current namespace filter (empty = all)
 
 	mu           sync.RWMutex
 	graph        *model.Graph
@@ -49,12 +51,71 @@ func NewManager(d *discovery.Discoverer, st *store.Store, sourcePath string) *Ma
 		scanner:      traffic.NewScanner(d.Clientset(), d.RestConfig(), d.Namespace()),
 		store:        st,
 		sourcePath:   sourcePath,
+		namespace:    d.Namespace(),
 		trafficEdges: make(map[string]model.Edge),
 		subs:         make(map[chan Event]struct{}),
 	}
 }
 
-func (m *Manager) Store() *store.Store { return m.store }
+func (m *Manager) Store() *store.Store   { return m.store }
+func (m *Manager) KubeContext() string   { m.mu.RLock(); defer m.mu.RUnlock(); return m.kubeContext }
+func (m *Manager) Namespace() string     { m.mu.RLock(); defer m.mu.RUnlock(); return m.namespace }
+func (m *Manager) Discoverer() *discovery.Discoverer {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.discoverer
+}
+
+// Reconfigure switches the cluster context and/or namespace, re-initializes
+// discovery and traffic scanning, and broadcasts the new graph.
+func (m *Manager) Reconfigure(ctx context.Context, kubeContext, namespace string) error {
+	d, err := discovery.NewDiscovererWithContext(kubeContext, namespace)
+	if err != nil {
+		return err
+	}
+	g, err := d.Discover(ctx)
+	if err != nil {
+		return err
+	}
+	if m.sourcePath != "" {
+		sourceEdges, err := discovery.ScanSource(m.sourcePath)
+		if err != nil {
+			log.Printf("source scan on reconfigure: %v", err)
+		} else {
+			discovery.MergeSourceEdges(g, sourceEdges)
+		}
+	}
+	collapsed, idMap := model.Collapse(g)
+	scanner := traffic.NewScanner(d.Clientset(), d.RestConfig(), d.Namespace())
+
+	m.mu.Lock()
+	m.discoverer = d
+	m.scanner = scanner
+	m.kubeContext = kubeContext
+	m.namespace = namespace
+	m.graph = collapsed
+	m.idMap = idMap
+	m.traffic = nil
+	m.recentScans = nil
+	m.trafficEdges = make(map[string]model.Edge)
+	if m.store != nil {
+		if edges, err := m.store.LoadTrafficEdges(); err == nil {
+			for _, e := range edges {
+				m.trafficEdges[e.From+"\t"+e.To] = e
+			}
+		}
+		m.mergeTrafficEdgesLocked()
+	}
+	m.mu.Unlock()
+
+	if m.store != nil {
+		if err := m.store.RecordNodes(collapsed.Nodes); err != nil {
+			log.Printf("store record nodes on reconfigure: %v", err)
+		}
+	}
+	m.broadcast(Event{Type: "graph", Data: collapsed})
+	return nil
+}
 
 func (m *Manager) SetInitialGraph(g *model.Graph) {
 	collapsed, idMap := model.Collapse(g)
