@@ -351,12 +351,12 @@
         selector: 'node',
         style: {
           'label': 'data(label)', 'text-valign': 'center', 'text-halign': 'center',
-          'font-size': '12px',
+          'font-size': 'mapData(deg, 0, 20, 11, 15)',
           'font-family': "'JetBrains Mono', 'SF Mono', Consolas, monospace",
           'color': '#e6edf3', 'text-outline-color': '#0d1117', 'text-outline-width': 2,
-          'width': 'label', 'height': 36, 'padding': '14px',
+          'width': 'label', 'height': 'mapData(deg, 0, 20, 34, 52)', 'padding': 'mapData(deg, 0, 20, 12, 22)',
           'shape': 'round-rectangle', 'background-color': '#58a6ff',
-          'border-width': 1, 'border-color': '#30363d',
+          'border-width': 'mapData(deg, 0, 20, 1, 2.5)', 'border-color': '#30363d',
         }
       },
       ...Object.entries(KIND_COLORS).map(([kind, color]) => ({
@@ -646,6 +646,11 @@
       if (deadFilterActive) applyDeadFilter();
     }
 
+    function updateDegrees() {
+      if (!cy) return;
+      cy.nodes().forEach(n => { n.data('deg', n.degree(false)); });
+    }
+
     function buildGraph(graph) {
       // Skip full rebuild if structure hasn't changed.
       const fp = graphFingerprint(graph);
@@ -701,6 +706,7 @@
               added.layout({ name: 'grid', boundingBox: { x1: 50, y1: 50, w: 200, h: 200 }, fit: false }).run();
             }
           }
+          updateDegrees();
           if (lastTrafficSnapshot) applyTraffic(lastTrafficSnapshot);
           return;
         }
@@ -903,6 +909,7 @@
       cy.container().addEventListener('contextmenu', e => e.preventDefault());
       cy.on('pan zoom', hideContextMenu);
 
+      updateDegrees();
       fetchStats();
       if (searchQuery) onSearch(searchQuery);
       if (lastTrafficSnapshot) setTimeout(() => applyTraffic(lastTrafficSnapshot), 0);
@@ -1026,6 +1033,7 @@
         }
       });
 
+      updateDegrees();
       startPulse();
     }
 
