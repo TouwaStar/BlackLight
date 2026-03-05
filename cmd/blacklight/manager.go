@@ -39,7 +39,7 @@ type Manager struct {
 	idMap        map[string]string // collapsed Service ID → Workload ID
 	recentScans  []timedSnapshot   // rolling window of recent scans
 	trafficEdges map[string]model.Edge // edges discovered from traffic (key: "from\tto")
-	trafficNodes map[string]model.Node // External nodes created from traffic (key: node ID)
+	trafficNodes map[string]model.Node // Cloud nodes created from traffic (key: node ID)
 
 	subsMu sync.Mutex
 	subs   map[chan Event]struct{}
@@ -303,7 +303,7 @@ func (m *Manager) trafficLoop(ctx context.Context) {
 }
 
 // addTrafficEdges checks for traffic between nodes that have no edge in the graph.
-// Also creates External nodes for cloud traffic connections.
+// Also creates Cloud nodes for cloud traffic connections.
 // Returns true if the graph was updated.
 func (m *Manager) addTrafficEdges(snap *model.TrafficSnapshot) bool {
 	if snap == nil {
@@ -340,18 +340,18 @@ func (m *Manager) addTrafficEdges(snap *model.TrafficSnapshot) bool {
 		changed = true
 	}
 
-	// Create External nodes for cloud traffic (RDS, S3, etc.).
+	// Create Cloud nodes for cloud services (RDS, S3, etc.).
 	for _, cl := range snap.Cloud {
 		if !nodeSet[cl.NodeID] {
 			continue
 		}
 		for _, ip := range cl.TopIPs {
 			hostname := ip.IP // resolved DNS hostname (or raw IP if unresolved)
-			extID := model.NodeID("External", "", hostname)
+			extID := model.NodeID("Cloud", "", hostname)
 			if !nodeSet[extID] {
 				node := model.Node{
 					ID:          extID,
-					Kind:        "External",
+					Kind:        "Cloud",
 					Name:        hostname,
 					DisplayName: hostname,
 				}
@@ -384,7 +384,7 @@ func (m *Manager) mergeTrafficEdgesLocked() {
 	for _, n := range m.graph.Nodes {
 		nodeSet[n.ID] = true
 	}
-	// Re-add External nodes from traffic that aren't in the current graph.
+	// Re-add Cloud nodes from traffic that aren't in the current graph.
 	for id, node := range m.trafficNodes {
 		if !nodeSet[id] {
 			m.graph.Nodes = append(m.graph.Nodes, node)

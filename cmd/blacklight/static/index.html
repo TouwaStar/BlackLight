@@ -96,6 +96,16 @@
       color: #c9d1d9; display: flex; align-items: center; gap: 0.4rem;
     }
     .ctx-item:hover { background: #388bfd33; color: #e6edf3; }
+    #confirmOverlay {
+      display: none; position: fixed; inset: 0; z-index: 300;
+      background: rgba(0,0,0,0.5); align-items: center; justify-content: center;
+    }
+    #confirmDialog {
+      background: #1c2129; border: 1px solid #30363d; border-radius: 8px;
+      padding: 1rem 1.25rem; min-width: 300px; max-width: 400px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+    }
+    #confirmMsg { font-size: 0.8rem; color: #e6edf3; line-height: 1.5; }
     #logPanel {
       display: none; flex-shrink: 0; height: 35vh;
       background: #0d1117; border-top: 1px solid #30363d;
@@ -235,7 +245,7 @@
       <div class="legend-item"><span class="legend-dot" style="background:#79c0ff"></span> CronJob</div>
       <div class="legend-item"><span class="legend-dot" style="background:#7ee787"></span> Job</div>
       <div class="legend-item"><span class="legend-dot" style="background:#58a6ff"></span> Service (standalone)</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#f78166"></span> External</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#f78166"></span> Cloud</div>
       <div class="legend-item"><span class="legend-dot" style="background:#39d353;border-radius:50%"></span> Active traffic</div>
       <div class="legend-item"><span class="legend-dot" style="background:#f85149;border-radius:50%"></span> Connection errors</div>
       <div class="legend-item"><span class="legend-dot" style="background:#0d1117;border:2px solid #f0883e"></span> External traffic</div>
@@ -291,6 +301,16 @@
     <div class="ctx-item" id="ctxShell" onclick="shellFromMenu()">Shell</div>
     <div class="ctx-item" id="ctxDescribe" onclick="describeFromMenu()">Describe</div>
     <div class="ctx-item" id="ctxEnv" onclick="envFromMenu()">Env</div>
+    <div class="ctx-item" id="ctxRestart" onclick="restartFromMenu()" style="color:#f85149">Restart</div>
+  </div>
+  <div id="confirmOverlay" style="display:none">
+    <div id="confirmDialog">
+      <div id="confirmMsg"></div>
+      <div style="display:flex;gap:0.5rem;justify-content:flex-end;margin-top:0.75rem">
+        <button class="log-btn" onclick="confirmCancel()">Cancel</button>
+        <button class="log-btn" id="confirmOk" style="background:#f8514933;color:#f85149;border-color:#f85149">Confirm</button>
+      </div>
+    </div>
   </div>
   <div id="descPanel" style="display:none">
     <div id="descHeader">
@@ -312,7 +332,7 @@
       Ingress: '#f0883e', Service: '#58a6ff', Deployment: '#3fb950',
       StatefulSet: '#a371f7', DaemonSet: '#d29922',
       CronJob: '#79c0ff', Job: '#7ee787',
-      External: '#f78166',
+      Cloud: '#f78166',
     };
     const EDGE_COLORS = {
       ingress_backend: '#f0883e',
@@ -323,7 +343,7 @@
       Ingress: 'round-diamond', Service: 'round-rectangle',
       Deployment: 'round-rectangle', StatefulSet: 'barrel', DaemonSet: 'hexagon',
       CronJob: 'diamond', Job: 'tag',
-      External: 'round-triangle',
+      Cloud: 'ellipse',
     };
 
     const STYLES = [
@@ -1019,7 +1039,7 @@
     }
 
     document.addEventListener('click', hideContextMenu);
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') hideContextMenu(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') { hideContextMenu(); confirmCancel(); } });
 
     function showContextMenu(evt) {
       const node = evt.target;
@@ -1027,11 +1047,13 @@
       ctxNode = node;
       // Show Logs/Shell/Env only for workload kinds that have pods.
       const hasPods = ['Deployment', 'StatefulSet', 'DaemonSet', 'Job'].includes(kind);
-      const isExternal = kind === 'External';
+      const isCloud = kind === 'Cloud';
       document.getElementById('ctxLogs').style.display = hasPods ? '' : 'none';
       document.getElementById('ctxShell').style.display = hasPods ? '' : 'none';
       document.getElementById('ctxEnv').style.display = hasPods ? '' : 'none';
-      document.getElementById('ctxDescribe').style.display = isExternal ? 'none' : '';
+      document.getElementById('ctxDescribe').style.display = isCloud ? 'none' : '';
+      const canRestart = ['Deployment', 'StatefulSet', 'DaemonSet'].includes(kind);
+      document.getElementById('ctxRestart').style.display = canRestart ? '' : 'none';
       // Don't show empty menu if no items are visible.
       const items = ctxMenu.querySelectorAll('.ctx-item');
       const anyVisible = [...items].some(el => el.style.display !== 'none');
@@ -1415,6 +1437,51 @@
       envPanel.style.display = 'none';
       envContent.innerHTML = '';
       if (cy) cy.resize();
+    }
+
+    // --- Restart / Confirm dialog ---
+    let confirmCallback = null;
+
+    function showConfirm(msg, onConfirm) {
+      document.getElementById('confirmMsg').textContent = msg;
+      confirmCallback = onConfirm;
+      document.getElementById('confirmOverlay').style.display = 'flex';
+    }
+
+    function confirmCancel() {
+      document.getElementById('confirmOverlay').style.display = 'none';
+      confirmCallback = null;
+    }
+
+    document.getElementById('confirmOk').addEventListener('click', function() {
+      document.getElementById('confirmOverlay').style.display = 'none';
+      if (confirmCallback) { confirmCallback(); confirmCallback = null; }
+    });
+
+    function restartFromMenu() {
+      if (!ctxNode) return;
+      const d = ctxNode.data();
+      const node = ctxNode;
+      hideContextMenu();
+      showConfirm(
+        'Restart ' + d.kind + ' ' + d.namespace + '/' + d.label + '? This will trigger a rolling restart of all pods.',
+        function() {
+          fetch('/api/restart?kind=' + encodeURIComponent(d.kind) +
+                '&namespace=' + encodeURIComponent(d.namespace) +
+                '&name=' + encodeURIComponent(d.label), { method: 'POST' })
+            .then(resp => {
+              if (!resp.ok) return resp.text().then(t => { throw new Error(t); });
+              return resp.json();
+            })
+            .then(() => {
+              // Brief visual feedback on the node.
+              node.style('border-color', '#f85149');
+              node.style('border-width', 3);
+              setTimeout(() => { node.removeStyle('border-color border-width'); }, 3000);
+            })
+            .catch(err => { alert('Restart failed: ' + err.message); });
+        }
+      );
     }
 
     // --- Global log search ---

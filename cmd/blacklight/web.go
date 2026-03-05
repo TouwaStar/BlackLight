@@ -393,6 +393,79 @@ func serveWeb(mgr *Manager, port int) error {
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	http.HandleFunc("/api/restart", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		kind, namespace, name, err := workloadParams(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		d := mgr.Discoverer()
+		cs := d.Clientset()
+		ctx := r.Context()
+		restartAnnotation := map[string]string{
+			"kubectl.kubernetes.io/restartedAt": time.Now().Format(time.RFC3339),
+		}
+		switch kind {
+		case "Deployment":
+			dep, err := cs.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if dep.Spec.Template.Annotations == nil {
+				dep.Spec.Template.Annotations = make(map[string]string)
+			}
+			for k, v := range restartAnnotation {
+				dep.Spec.Template.Annotations[k] = v
+			}
+			if _, err := cs.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		case "StatefulSet":
+			sts, err := cs.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if sts.Spec.Template.Annotations == nil {
+				sts.Spec.Template.Annotations = make(map[string]string)
+			}
+			for k, v := range restartAnnotation {
+				sts.Spec.Template.Annotations[k] = v
+			}
+			if _, err := cs.AppsV1().StatefulSets(namespace).Update(ctx, sts, metav1.UpdateOptions{}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		case "DaemonSet":
+			ds, err := cs.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if ds.Spec.Template.Annotations == nil {
+				ds.Spec.Template.Annotations = make(map[string]string)
+			}
+			for k, v := range restartAnnotation {
+				ds.Spec.Template.Annotations[k] = v
+			}
+			if _, err := cs.AppsV1().DaemonSets(namespace).Update(ctx, ds, metav1.UpdateOptions{}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		default:
+			http.Error(w, "restart not supported for "+kind, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+
 	http.HandleFunc("/api/search-logs", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query().Get("q")
 		if query == "" {

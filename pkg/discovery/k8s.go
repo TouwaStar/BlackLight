@@ -588,11 +588,11 @@ func (d *Discoverer) addEdgesFromPodEnv(ctx context.Context, g *model.Graph, nam
 				if ref.hostname == "" {
 					continue
 				}
-				targetID = model.NodeID("External", "", ref.hostname)
+				targetID = model.NodeID("Cloud", "", ref.hostname)
 				if !existingIDs[targetID] {
 					g.Nodes = append(g.Nodes, model.Node{
 						ID:          targetID,
-						Kind:        "External",
+						Kind:        "Cloud",
 						Name:        ref.hostname,
 						DisplayName: ref.hostname,
 					})
