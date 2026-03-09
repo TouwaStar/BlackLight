@@ -81,7 +81,10 @@
     .legend {
       display: flex; gap: 1rem; align-items: center; font-size: 0.7rem; color: #8b949e;
     }
-    .legend-item { display: flex; align-items: center; gap: 0.3rem; }
+    .legend-item { display: flex; align-items: center; gap: 0.3rem; cursor: default; }
+    .legend-item[data-kind] { cursor: pointer; user-select: none; transition: opacity 0.15s; }
+    .legend-item[data-kind]:hover { color: #e6edf3; }
+    .legend-item[data-kind].kind-hidden { opacity: 0.3; text-decoration: line-through; }
     .legend-dot {
       width: 10px; height: 10px; border-radius: 2px; display: inline-block;
     }
@@ -238,14 +241,14 @@
   <header>
     <h1>Blacklight</h1>
     <div class="legend">
-      <div class="legend-item"><span class="legend-dot" style="background:#f0883e"></span> Ingress</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#3fb950"></span> Deployment</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#a371f7"></span> StatefulSet</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#d29922"></span> DaemonSet</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#79c0ff"></span> CronJob</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#7ee787"></span> Job</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#58a6ff"></span> Service (standalone)</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#f78166"></span> Cloud</div>
+      <div class="legend-item" data-kind="Ingress" onclick="toggleKind(this)"><span class="legend-dot" style="background:#f0883e"></span> Ingress</div>
+      <div class="legend-item" data-kind="Deployment" onclick="toggleKind(this)"><span class="legend-dot" style="background:#3fb950"></span> Deployment</div>
+      <div class="legend-item" data-kind="StatefulSet" onclick="toggleKind(this)"><span class="legend-dot" style="background:#a371f7"></span> StatefulSet</div>
+      <div class="legend-item" data-kind="DaemonSet" onclick="toggleKind(this)"><span class="legend-dot" style="background:#d29922"></span> DaemonSet</div>
+      <div class="legend-item" data-kind="CronJob" onclick="toggleKind(this)"><span class="legend-dot" style="background:#79c0ff"></span> CronJob</div>
+      <div class="legend-item" data-kind="Job" onclick="toggleKind(this)"><span class="legend-dot" style="background:#7ee787"></span> Job</div>
+      <div class="legend-item" data-kind="Service" onclick="toggleKind(this)"><span class="legend-dot" style="background:#58a6ff"></span> Service</div>
+      <div class="legend-item" data-kind="Cloud" onclick="toggleKind(this)"><span class="legend-dot" style="background:#f78166"></span> Cloud</div>
       <div class="legend-item"><span class="legend-dot" style="background:#39d353;border-radius:50%"></span> Active traffic</div>
       <div class="legend-item"><span class="legend-dot" style="background:#f85149;border-radius:50%"></span> Connection errors</div>
       <div class="legend-item"><span class="legend-dot" style="background:#0d1117;border:2px solid #f0883e"></span> External traffic</div>
@@ -651,6 +654,34 @@
       cy.nodes().forEach(n => { n.data('deg', n.degree(false)); });
     }
 
+    const hiddenKinds = new Set();
+
+    function toggleKind(el) {
+      const kind = el.dataset.kind;
+      if (hiddenKinds.has(kind)) {
+        hiddenKinds.delete(kind);
+        el.classList.remove('kind-hidden');
+      } else {
+        hiddenKinds.add(kind);
+        el.classList.add('kind-hidden');
+      }
+      applyKindFilter();
+    }
+
+    function applyKindFilter() {
+      if (!cy) return;
+      cy.batch(() => {
+        cy.nodes().forEach(node => {
+          const kind = node.data('kind');
+          if (hiddenKinds.has(kind)) {
+            node.style('display', 'none');
+          } else {
+            node.style('display', 'element');
+          }
+        });
+      });
+    }
+
     function buildGraph(graph) {
       // Skip full rebuild if structure hasn't changed.
       const fp = graphFingerprint(graph);
@@ -707,6 +738,7 @@
             }
           }
           updateDegrees();
+          applyKindFilter();
           if (lastTrafficSnapshot) applyTraffic(lastTrafficSnapshot);
           return;
         }
@@ -910,6 +942,7 @@
       cy.on('pan zoom', hideContextMenu);
 
       updateDegrees();
+      applyKindFilter();
       fetchStats();
       if (searchQuery) onSearch(searchQuery);
       if (lastTrafficSnapshot) setTimeout(() => applyTraffic(lastTrafficSnapshot), 0);
