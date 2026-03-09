@@ -29,10 +29,35 @@ type Graph struct {
 
 // TrafficConnection represents an observed TCP connection between a workload and a target.
 type TrafficConnection struct {
-	SourceWorkload string `json:"source_workload"` // node ID
-	TargetService  string `json:"target_service"`  // node ID
-	ConnCount      int    `json:"conn_count"`
-	ErrorCount     int    `json:"error_count"` // SYN_SENT + CLOSE_WAIT connections
+	SourceWorkload string            `json:"source_workload"` // node ID
+	TargetService  string            `json:"target_service"`  // node ID
+	ConnCount      int               `json:"conn_count"`
+	ErrorCount     int               `json:"error_count"`            // SYN_SENT + CLOSE_WAIT connections
+	Ports          []PortCount       `json:"ports,omitempty"`        // connections grouped by remote port
+	Pods           []PodTraffic      `json:"pods,omitempty"`         // per-pod breakdown
+	States         *StateBreakdown   `json:"states,omitempty"`       // TCP state counts
+}
+
+// PortCount groups connections by remote port.
+type PortCount struct {
+	Port   uint16 `json:"port"`
+	Conns  int    `json:"conns"`
+	Errors int    `json:"errors"`
+}
+
+// PodTraffic shows per-pod connection details.
+type PodTraffic struct {
+	Pod    string `json:"pod"`
+	Conns  int    `json:"conns"`
+	Errors int    `json:"errors"`
+}
+
+// StateBreakdown shows connections by TCP state.
+type StateBreakdown struct {
+	Established int `json:"established"`
+	TimeWait    int `json:"time_wait"`
+	SynSent     int `json:"syn_sent"`
+	CloseWait   int `json:"close_wait"`
 }
 
 // ExternalTraffic records inbound connections from outside the cluster to a workload.

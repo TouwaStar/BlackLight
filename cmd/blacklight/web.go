@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/TouwaStar/BlackLight/pkg/traffic"
 	"github.com/gorilla/websocket"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -91,6 +93,13 @@ func serveWeb(mgr *Manager, port int) error {
 		rangeStr := r.URL.Query().Get("range")
 		if rangeStr == "" {
 			rangeStr = "24h"
+		}
+		// Go's time.ParseDuration doesn't support "d"; convert to hours.
+		if strings.HasSuffix(rangeStr, "d") {
+			days, err := strconv.Atoi(strings.TrimSuffix(rangeStr, "d"))
+			if err == nil && days > 0 {
+				rangeStr = strconv.Itoa(days*24) + "h"
+			}
 		}
 		dur, err := time.ParseDuration(rangeStr)
 		if err != nil {
@@ -466,6 +475,38 @@ func serveWeb(mgr *Manager, port int) error {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	http.HandleFunc("/api/pods", func(w http.ResponseWriter, r *http.Request) {
+		kind, namespace, name, err := workloadParams(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		d := mgr.Discoverer()
+		pods, err := listPodsForWorkload(r.Context(), d.Clientset(), kind, namespace, name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(pods)
+	})
+
+	http.HandleFunc("/api/metrics", func(w http.ResponseWriter, r *http.Request) {
+		kind, namespace, name, err := workloadParams(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		d := mgr.Discoverer()
+		metrics, err := getPodMetrics(r.Context(), d.Clientset(), kind, namespace, name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(metrics)
+	})
+
 	http.HandleFunc("/api/search-logs", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query().Get("q")
 		if query == "" {
@@ -675,42 +716,12 @@ func workloadParams(r *http.Request) (kind, namespace, name string, err error) {
 
 // findPodForWorkload resolves a workload (Deployment, StatefulSet, etc.) to a running pod.
 func findPodForWorkload(ctx context.Context, clientset *kubernetes.Clientset, kind, namespace, name string) (string, string, error) {
-	var selector *metav1.LabelSelector
-	switch kind {
-	case "Deployment":
-		obj, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return "", "", fmt.Errorf("get deployment: %w", err)
-		}
-		selector = obj.Spec.Selector
-	case "StatefulSet":
-		obj, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return "", "", fmt.Errorf("get statefulset: %w", err)
-		}
-		selector = obj.Spec.Selector
-	case "DaemonSet":
-		obj, err := clientset.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return "", "", fmt.Errorf("get daemonset: %w", err)
-		}
-		selector = obj.Spec.Selector
-	case "Job":
-		obj, err := clientset.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return "", "", fmt.Errorf("get job: %w", err)
-		}
-		selector = obj.Spec.Selector
-	default:
-		return "", "", fmt.Errorf("unsupported kind: %s", kind)
-	}
-
-	sel, err := metav1.LabelSelectorAsSelector(selector)
+	sel, err := selectorForWorkload(ctx, clientset, kind, namespace, name)
 	if err != nil {
-		return "", "", fmt.Errorf("label selector: %w", err)
+		return "", "", err
 	}
 	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: sel.String(),
+		LabelSelector: sel,
 		FieldSelector: "status.phase=Running",
 	})
 	if err != nil {
@@ -1173,5 +1184,212 @@ func getEnvVars(ctx context.Context, cs *kubernetes.Clientset, namespace, podNam
 		resp.Containers = append(resp.Containers, ce)
 	}
 
+	return resp, nil
+}
+
+// --- Pod list ---
+
+type podInfo struct {
+	Name       string          `json:"name"`
+	Phase      string          `json:"phase"`
+	Ready      string          `json:"ready"`
+	Restarts   int32           `json:"restarts"`
+	Age        string          `json:"age"`
+	Node       string          `json:"node"`
+	IP         string          `json:"ip"`
+	Containers []containerInfo `json:"containers"`
+}
+
+type containerInfo struct {
+	Name  string `json:"name"`
+	Ready bool   `json:"ready"`
+	State string `json:"state"`
+	Image string `json:"image"`
+}
+
+type podsResponse struct {
+	Pods []podInfo `json:"pods"`
+}
+
+func listPodsForWorkload(ctx context.Context, cs *kubernetes.Clientset, kind, namespace, name string) (*podsResponse, error) {
+	sel, err := selectorForWorkload(ctx, cs, kind, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: sel,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+
+	resp := &podsResponse{}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		pi := podInfo{
+			Name:  p.Name,
+			Phase: string(p.Status.Phase),
+			Node:  p.Spec.NodeName,
+			IP:    p.Status.PodIP,
+			Age:   shortAge(time.Since(p.CreationTimestamp.Time)),
+		}
+
+		var readyCnt, totalCnt int
+		for _, cs := range p.Status.ContainerStatuses {
+			totalCnt++
+			if cs.Ready {
+				readyCnt++
+			}
+			pi.Restarts += cs.RestartCount
+
+			ci := containerInfo{
+				Name:  cs.Name,
+				Ready: cs.Ready,
+				Image: cs.Image,
+			}
+			switch {
+			case cs.State.Running != nil:
+				ci.State = "Running"
+			case cs.State.Waiting != nil:
+				ci.State = "Waiting: " + cs.State.Waiting.Reason
+			case cs.State.Terminated != nil:
+				ci.State = "Terminated: " + cs.State.Terminated.Reason
+			}
+			pi.Containers = append(pi.Containers, ci)
+		}
+		pi.Ready = fmt.Sprintf("%d/%d", readyCnt, totalCnt)
+		resp.Pods = append(resp.Pods, pi)
+	}
+	// Sort pods by name for consistent ordering.
+	sort.Slice(resp.Pods, func(i, j int) bool { return resp.Pods[i].Name < resp.Pods[j].Name })
+	return resp, nil
+}
+
+// selectorForWorkload returns the label selector string for a workload's pods.
+func selectorForWorkload(ctx context.Context, cs *kubernetes.Clientset, kind, namespace, name string) (string, error) {
+	var selector *metav1.LabelSelector
+	switch kind {
+	case "Deployment":
+		obj, err := cs.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get deployment: %w", err)
+		}
+		selector = obj.Spec.Selector
+	case "StatefulSet":
+		obj, err := cs.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get statefulset: %w", err)
+		}
+		selector = obj.Spec.Selector
+	case "DaemonSet":
+		obj, err := cs.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get daemonset: %w", err)
+		}
+		selector = obj.Spec.Selector
+	case "Job":
+		obj, err := cs.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("get job: %w", err)
+		}
+		selector = obj.Spec.Selector
+	default:
+		return "", fmt.Errorf("unsupported kind: %s", kind)
+	}
+	sel, err := metav1.LabelSelectorAsSelector(selector)
+	if err != nil {
+		return "", fmt.Errorf("label selector: %w", err)
+	}
+	return sel.String(), nil
+}
+
+func shortAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+// --- Pod metrics ---
+
+type containerMetrics struct {
+	Name   string `json:"name"`
+	CPUm   int64  `json:"cpu_millicores"`
+	MemMiB int64  `json:"mem_mib"`
+}
+
+type podMetrics struct {
+	Name       string             `json:"name"`
+	Containers []containerMetrics `json:"containers"`
+	TotalCPUm  int64              `json:"total_cpu_millicores"`
+	TotalMemMiB int64             `json:"total_mem_mib"`
+}
+
+type metricsResponse struct {
+	Pods []podMetrics `json:"pods"`
+}
+
+func getPodMetrics(ctx context.Context, cs *kubernetes.Clientset, kind, namespace, name string) (*metricsResponse, error) {
+	sel, err := selectorForWorkload(ctx, cs, kind, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+
+	// Query the metrics API directly via the REST client.
+	// This avoids importing the k8s.io/metrics module.
+	path := fmt.Sprintf("/apis/metrics.k8s.io/v1beta1/namespaces/%s/pods", namespace)
+	raw, err := cs.RESTClient().Get().
+		AbsPath(path).
+		Param("labelSelector", sel).
+		DoRaw(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("metrics API: %w", err)
+	}
+
+	var result struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Containers []struct {
+				Name  string            `json:"name"`
+				Usage map[string]string `json:"usage"`
+			} `json:"containers"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("parse metrics: %w", err)
+	}
+
+	resp := &metricsResponse{}
+	for _, item := range result.Items {
+		pm := podMetrics{Name: item.Metadata.Name}
+		for _, c := range item.Containers {
+			cm := containerMetrics{Name: c.Name}
+			if cpuStr, ok := c.Usage["cpu"]; ok {
+				q, err := resource.ParseQuantity(cpuStr)
+				if err == nil {
+					cm.CPUm = q.MilliValue()
+				}
+			}
+			if memStr, ok := c.Usage["memory"]; ok {
+				q, err := resource.ParseQuantity(memStr)
+				if err == nil {
+					cm.MemMiB = q.Value() / (1024 * 1024)
+				}
+			}
+			pm.TotalCPUm += cm.CPUm
+			pm.TotalMemMiB += cm.MemMiB
+			pm.Containers = append(pm.Containers, cm)
+		}
+		resp.Pods = append(resp.Pods, pm)
+	}
+	sort.Slice(resp.Pods, func(i, j int) bool { return resp.Pods[i].Name < resp.Pods[j].Name })
 	return resp, nil
 }

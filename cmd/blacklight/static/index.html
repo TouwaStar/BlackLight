@@ -88,7 +88,7 @@
     .legend-dot {
       width: 10px; height: 10px; border-radius: 2px; display: inline-block;
     }
-    #contextMenu {
+    #contextMenu, #edgeContextMenu {
       display: none; position: fixed; z-index: 200;
       background: #1c2129; border: 1px solid #30363d; border-radius: 6px;
       padding: 0.25rem 0; min-width: 140px;
@@ -217,6 +217,91 @@
     .env-table td:nth-child(2) { color: #c9d1d9; word-break: break-all; max-width: 400px; }
     .env-table td:nth-child(3) { color: #8b949e; font-size: 0.63rem; white-space: nowrap; }
     .env-container-name { color: #3fb950; font-weight: 600; margin: 0.5rem 0 0.25rem; font-size: 0.72rem; }
+    #podsPanel {
+      display: none; flex-shrink: 0; height: 35vh;
+      background: #0d1117; border-top: 1px solid #30363d;
+      flex-direction: column;
+    }
+    #podsHeader {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.3rem 0.75rem; background: #161b22;
+      border-bottom: 1px solid #30363d; flex-shrink: 0;
+    }
+    #podsTitle { font-size: 0.75rem; color: #e6edf3; font-weight: 600; }
+    #podsContent {
+      flex: 1; overflow-y: auto; padding: 0.5rem 0.75rem;
+      font-size: 0.7rem; color: #c9d1d9;
+    }
+    .pods-table { width: 100%; border-collapse: collapse; }
+    .pods-table th {
+      text-align: left; padding: 0.25rem 0.5rem; color: #8b949e;
+      border-bottom: 1px solid #30363d; font-weight: 600; font-size: 0.65rem;
+      text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap;
+    }
+    .pods-table td {
+      padding: 0.2rem 0.5rem; border-bottom: 1px solid #21262d;
+      font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.68rem;
+      vertical-align: top; white-space: nowrap;
+    }
+    .pods-table td:first-child { color: #58a6ff; }
+    .pod-phase-running { color: #3fb950; }
+    .pod-phase-pending { color: #d29922; }
+    .pod-phase-failed { color: #f85149; }
+    .pod-phase-succeeded { color: #8b949e; }
+    .metric-bar {
+      display: inline-block; height: 10px; border-radius: 2px;
+      background: #388bfd66; min-width: 2px;
+    }
+    .metric-val { color: #8b949e; font-size: 0.63rem; margin-left: 0.25rem; }
+    #trafficPanel {
+      display: none; flex-shrink: 0; height: 35vh;
+      background: #0d1117; border-top: 1px solid #30363d;
+      flex-direction: column;
+    }
+    #trafficHeader {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.3rem 0.75rem; background: #161b22;
+      border-bottom: 1px solid #30363d; flex-shrink: 0;
+    }
+    #trafficTitle { font-size: 0.75rem; color: #e6edf3; font-weight: 600; }
+    #trafficContent {
+      flex: 1; overflow-y: auto; padding: 0.5rem 0.75rem;
+      font-size: 0.7rem; color: #c9d1d9;
+    }
+    .traffic-summary {
+      display: flex; gap: 1.5rem; margin-bottom: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .traffic-stat { display: flex; flex-direction: column; }
+    .traffic-stat-label { font-size: 0.6rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; }
+    .traffic-stat-value { font-size: 0.9rem; font-weight: 600; }
+    .traffic-chart-wrap { margin-top: 0.5rem; }
+    .traffic-chart-title {
+      font-size: 0.65rem; color: #8b949e; text-transform: uppercase;
+      letter-spacing: 0.05em; margin-bottom: 0.25rem;
+    }
+    .traffic-chart {
+      display: flex; align-items: flex-end; gap: 1px;
+      height: 100px; background: #161b22; border-radius: 4px;
+      padding: 4px; border: 1px solid #21262d;
+    }
+    .traffic-bar {
+      flex: 1; min-width: 1px; border-radius: 1px 1px 0 0;
+      position: relative; cursor: crosshair;
+    }
+    .traffic-bar-conn { background: #39d35366; width: 100%; position: absolute; bottom: 0; border-radius: 1px 1px 0 0; }
+    .traffic-bar-err { background: #f8514999; width: 100%; position: absolute; bottom: 0; border-radius: 1px 1px 0 0; }
+    .traffic-chart-labels {
+      display: flex; justify-content: space-between;
+      font-size: 0.55rem; color: #484f58; margin-top: 0.15rem;
+    }
+    .traffic-range-btn {
+      font-family: inherit; font-size: 0.6rem; background: transparent;
+      color: #8b949e; border: 1px solid #30363d; border-radius: 3px;
+      padding: 0.1rem 0.4rem; cursor: pointer; margin-left: 0.25rem;
+    }
+    .traffic-range-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+    .traffic-range-btn.active { background: #388bfd22; border-color: #58a6ff; color: #58a6ff; }
     #globalLogSearch {
       font-family: inherit; font-size: 0.7rem;
       background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
@@ -304,7 +389,11 @@
     <div class="ctx-item" id="ctxShell" onclick="shellFromMenu()">Shell</div>
     <div class="ctx-item" id="ctxDescribe" onclick="describeFromMenu()">Describe</div>
     <div class="ctx-item" id="ctxEnv" onclick="envFromMenu()">Env</div>
+    <div class="ctx-item" id="ctxPods" onclick="podsFromMenu()">Pods</div>
     <div class="ctx-item" id="ctxRestart" onclick="restartFromMenu()" style="color:#f85149">Restart</div>
+  </div>
+  <div id="edgeContextMenu">
+    <div class="ctx-item" onclick="trafficFromMenu()">Traffic Details</div>
   </div>
   <div id="confirmOverlay" style="display:none">
     <div id="confirmDialog">
@@ -328,6 +417,23 @@
       <button class="log-btn" onclick="closeEnv()">Close</button>
     </div>
     <div id="envContent"></div>
+  </div>
+  <div id="podsPanel" style="display:none">
+    <div id="podsHeader">
+      <span id="podsTitle"></span>
+      <button class="log-btn" onclick="closePods()">Close</button>
+    </div>
+    <div id="podsContent"></div>
+  </div>
+  <div id="trafficPanel" style="display:none">
+    <div id="trafficHeader">
+      <span id="trafficTitle"></span>
+      <div>
+        <span id="trafficRangeBar"></span>
+        <button class="log-btn" onclick="closeTraffic()">Close</button>
+      </div>
+    </div>
+    <div id="trafficContent"></div>
   </div>
 
   <script>
@@ -920,11 +1026,19 @@
         tip.style.display = 'block';
       });
       cy.on('mouseover', 'edge', function(evt) {
-        const d = evt.target.data();
-        let html = `<strong>${d.kind}</strong>`;
-        if (d.detail) html += `<br>${d.detail}`;
+        const edge = evt.target;
+        const d = edge.data();
+        const srcLabel = edge.source().data('label') || d.source;
+        const tgtLabel = edge.target().data('label') || d.target;
+        const bidir = edge.style('source-arrow-shape') !== 'none';
+        const arrow = bidir ? ' ⇄ ' : ' → ';
+        let html = `<strong>${srcLabel}${arrow}${tgtLabel}</strong>`;
+        const kindLabels = { traffic: 'Observed traffic', env_ref: 'Env reference', code_ref: 'Code reference', ingress_backend: 'Ingress backend', selector: 'Selector' };
+        html += `<br><span style="color:#8b949e">${kindLabels[d.kind] || d.kind}</span>`;
+        if (d.detail && d.detail !== 'observed') html += `<br>${d.detail}`;
         if (d.connCount > 0) html += `<br>Active connections: ${d.connCount}`;
         if (d.errCount > 0) html += `<br><span style="color:#f85149">Errors: ${d.errCount} (SYN_SENT/CLOSE_WAIT)</span>`;
+        if (d.connCount > 0 || d.errCount > 0) html += `<br><span style="color:#484f58;font-size:0.65rem">Right-click for details</span>`;
         tip.innerHTML = html;
         tip.style.display = 'block';
       });
@@ -938,8 +1052,9 @@
 
       // Right-click context menu.
       cy.on('cxttap', 'node', showContextMenu);
+      cy.on('cxttap', 'edge', showEdgeContextMenu);
       cy.container().addEventListener('contextmenu', e => e.preventDefault());
-      cy.on('pan zoom', hideContextMenu);
+      cy.on('pan zoom', () => { hideContextMenu(); hideEdgeContextMenu(); });
 
       updateDegrees();
       applyKindFilter();
@@ -952,13 +1067,16 @@
       lastTrafficSnapshot = snapshot;
       if (!cy || !snapshot || !snapshot.connections) return;
 
-      // Build lookups: "source\ttarget" → {conn, err}
+      // Build lookups: "source\ttarget" → {conn, err, ports, pods, states}
       const traffic = new Map();
       for (const c of snapshot.connections) {
         const key = c.source_workload + '\t' + c.target_service;
-        const prev = traffic.get(key) || { conn: 0, err: 0 };
+        const prev = traffic.get(key) || { conn: 0, err: 0, ports: [], pods: [], states: null };
         prev.conn += c.conn_count;
         prev.err += (c.error_count || 0);
+        if (c.ports && c.ports.length) prev.ports = c.ports;
+        if (c.pods && c.pods.length) prev.pods = c.pods;
+        if (c.states) prev.states = c.states;
         traffic.set(key, prev);
       }
 
@@ -1002,11 +1120,28 @@
         const tgt = edge.data('target');
         const fwd = traffic.get(src + '\t' + tgt);
         const rev = traffic.get(tgt + '\t' + src);
-        const counts = fwd || rev || { conn: 0, err: 0 };
+        const counts = {
+          conn: (fwd ? fwd.conn : 0) + (rev ? rev.conn : 0),
+          err: (fwd ? fwd.err : 0) + (rev ? rev.err : 0),
+        };
+        const bidir = fwd && rev && fwd.conn > 0 && rev.conn > 0;
 
         edge.data('connCount', counts.conn);
         edge.data('errCount', counts.err);
+        edge.data('bidir', bidir);
+        // Store detail data for the traffic panel (only when present — partials don't have it).
+        const primary = fwd || rev || {};
+        if (primary.ports && primary.ports.length) edge.data('ports', primary.ports);
+        if (primary.pods && primary.pods.length) edge.data('pods', primary.pods);
+        if (primary.states) edge.data('states', primary.states);
         edge.removeClass('traffic-active traffic-idle traffic-error');
+
+        // Show source arrow when traffic flows both ways.
+        if (bidir) {
+          edge.style({ 'source-arrow-shape': 'triangle', 'source-arrow-color': edge.style('target-arrow-color') });
+        } else {
+          edge.style({ 'source-arrow-shape': 'none' });
+        }
 
         if (counts.err > 0) {
           const ratio = logMax > 0 ? Math.log(1 + counts.err) / logMax : 0.5;
@@ -1014,25 +1149,30 @@
           const opacity = 0.6 + ratio * 0.4;
           edge.data('baseWidth', width);
           edge.addClass('traffic-error');
-          edge.style({
+          const errStyle = {
             'line-color': '#f85149',
             'target-arrow-color': '#f85149',
             'mid-target-arrow-color': '#f85149',
             'width': width,
             'line-opacity': opacity,
-          });
+          };
+          if (bidir) errStyle['source-arrow-color'] = '#f85149';
+          edge.style(errStyle);
         } else if (counts.conn > 0) {
           const ratio = logMax > 0 ? Math.log(1 + counts.conn) / logMax : 0.5;
           const width = 1.5 + ratio * 5;        // 1.5px → 6.5px
           const opacity = 0.5 + ratio * 0.5;    // 0.5 → 1.0
           edge.data('baseWidth', width);
           edge.addClass('traffic-active');
-          edge.style({ 'width': width, 'line-opacity': opacity });
+          const activeStyle = { 'width': width, 'line-opacity': opacity };
+          if (bidir) activeStyle['source-arrow-color'] = '#39d353';
+          edge.style(activeStyle);
           edge.removeStyle('line-color target-arrow-color mid-target-arrow-color');
         } else {
           edge.data('baseWidth', 1);
           edge.addClass('traffic-idle');
-          edge.removeStyle('line-color target-arrow-color mid-target-arrow-color width line-opacity');
+          edge.style({ 'source-arrow-shape': 'none' });
+          edge.removeStyle('line-color target-arrow-color mid-target-arrow-color source-arrow-color width line-opacity');
         }
       });
 
@@ -1079,8 +1219,30 @@
       ctxNode = null;
     }
 
-    document.addEventListener('click', hideContextMenu);
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') { hideContextMenu(); confirmCancel(); } });
+    // --- Edge context menu ---
+    const edgeCtxMenu = document.getElementById('edgeContextMenu');
+    let ctxEdge = null;
+
+    function hideEdgeContextMenu() {
+      edgeCtxMenu.style.display = 'none';
+      ctxEdge = null;
+    }
+
+    function showEdgeContextMenu(evt) {
+      const edge = evt.target;
+      const d = edge.data();
+      // Only show for edges with traffic.
+      if ((d.connCount || 0) === 0 && (d.errCount || 0) === 0) return;
+      ctxEdge = edge;
+      hideContextMenu();
+      const pos = evt.originalEvent;
+      edgeCtxMenu.style.left = pos.clientX + 'px';
+      edgeCtxMenu.style.top = pos.clientY + 'px';
+      edgeCtxMenu.style.display = 'block';
+    }
+
+    document.addEventListener('click', () => { hideContextMenu(); hideEdgeContextMenu(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') { hideContextMenu(); hideEdgeContextMenu(); confirmCancel(); } });
 
     function showContextMenu(evt) {
       const node = evt.target;
@@ -1092,6 +1254,7 @@
       document.getElementById('ctxLogs').style.display = hasPods ? '' : 'none';
       document.getElementById('ctxShell').style.display = hasPods ? '' : 'none';
       document.getElementById('ctxEnv').style.display = hasPods ? '' : 'none';
+      document.getElementById('ctxPods').style.display = hasPods ? '' : 'none';
       document.getElementById('ctxDescribe').style.display = isCloud ? 'none' : '';
       const canRestart = ['Deployment', 'StatefulSet', 'DaemonSet'].includes(kind);
       document.getElementById('ctxRestart').style.display = canRestart ? '' : 'none';
@@ -1209,6 +1372,8 @@
 
     function openLogs(nodeId, kind, namespace, name) {
       closeEnv();
+      closePods();
+      closeTraffic();
       // Abort previous stream.
       if (logAbort) logAbort.abort();
       logLines = [];
@@ -1296,6 +1461,8 @@
       closeShell();
       closeLogs();
       closeEnv();
+      closePods();
+      closeTraffic();
 
       termTitle.textContent = 'Shell: ' + namespace + '/' + name;
       termPanel.style.display = 'flex';
@@ -1390,6 +1557,8 @@
       closeShell();
       closeDescribe();
       closeEnv();
+      closePods();
+      closeTraffic();
 
       descTitle.textContent = 'Describe: ' + kind + '/' + namespace + '/' + name;
       descContent.textContent = 'Loading...';
@@ -1434,6 +1603,8 @@
       closeShell();
       closeDescribe();
       closeEnv();
+      closePods();
+      closeTraffic();
 
       envTitle.textContent = 'Env: ' + kind + '/' + namespace + '/' + name;
       envContent.innerHTML = '<span style="color:#8b949e">Loading...</span>';
@@ -1477,6 +1648,337 @@
     function closeEnv() {
       envPanel.style.display = 'none';
       envContent.innerHTML = '';
+      if (cy) cy.resize();
+    }
+
+    // --- Pods panel ---
+    const podsPanel = document.getElementById('podsPanel');
+    const podsTitle = document.getElementById('podsTitle');
+    const podsContent = document.getElementById('podsContent');
+
+    function podsFromMenu() {
+      if (!ctxNode) return;
+      const d = ctxNode.data();
+      openPods(d.kind, d.namespace, d.label);
+      hideContextMenu();
+    }
+
+    function openPods(kind, namespace, name) {
+      closeLogs();
+      closeShell();
+      closeDescribe();
+      closeEnv();
+      closePods();
+      closeTraffic();
+
+      podsTitle.textContent = 'Pods: ' + kind + '/' + namespace + '/' + name;
+      podsContent.innerHTML = '<span style="color:#8b949e">Loading...</span>';
+      podsPanel.style.display = 'flex';
+      if (cy) cy.resize();
+
+      const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      const qs = 'kind=' + encodeURIComponent(kind) + '&namespace=' + encodeURIComponent(namespace) + '&name=' + encodeURIComponent(name);
+
+      // Fetch pods and metrics in parallel.
+      const podsFetch = fetch('/api/pods?' + qs).then(r => {
+        if (!r.ok) return r.text().then(t => { throw new Error(t); });
+        return r.json();
+      });
+      const metricsFetch = fetch('/api/metrics?' + qs).then(r => {
+        if (!r.ok) return null;
+        return r.json();
+      }).catch(() => null);
+
+      Promise.all([podsFetch, metricsFetch])
+        .then(([podsData, metricsData]) => {
+          // Build a map of pod -> metrics for quick lookup.
+          const metricsMap = {};
+          if (metricsData && metricsData.pods) {
+            for (const pm of metricsData.pods) {
+              metricsMap[pm.name] = pm;
+            }
+          }
+          const hasMetrics = Object.keys(metricsMap).length > 0;
+
+          let html = '<table class="pods-table"><tr><th>Name</th><th>Ready</th><th>Status</th><th>Restarts</th><th>Age</th><th>Node</th><th>IP</th>';
+          if (hasMetrics) html += '<th>CPU</th><th>Memory</th>';
+          html += '</tr>';
+
+          for (const p of podsData.pods) {
+            const phaseClass = 'pod-phase-' + p.phase.toLowerCase();
+            html += '<tr>';
+            html += '<td>' + esc(p.name) + '</td>';
+            html += '<td>' + esc(p.ready) + '</td>';
+            html += '<td class="' + phaseClass + '">' + esc(p.phase) + '</td>';
+            html += '<td>' + (p.restarts > 0 ? '<span style="color:#d29922">' + p.restarts + '</span>' : '0') + '</td>';
+            html += '<td>' + esc(p.age) + '</td>';
+            html += '<td style="color:#8b949e">' + esc(p.node) + '</td>';
+            html += '<td style="color:#8b949e">' + esc(p.ip || '') + '</td>';
+            if (hasMetrics) {
+              const m = metricsMap[p.name];
+              if (m) {
+                html += '<td><span class="metric-val">' + m.total_cpu_millicores + 'm</span></td>';
+                html += '<td><span class="metric-val">' + m.total_mem_mib + ' MiB</span></td>';
+              } else {
+                html += '<td><span class="metric-val">-</span></td><td><span class="metric-val">-</span></td>';
+              }
+            }
+            html += '</tr>';
+
+            // Show container details if multiple containers or any not ready.
+            if (p.containers && p.containers.length > 1) {
+              for (const c of p.containers) {
+                const cReady = c.ready ? '<span style="color:#3fb950">✓</span>' : '<span style="color:#f85149">✗</span>';
+                html += '<tr style="opacity:0.7"><td style="padding-left:1.5rem;color:#8b949e;font-size:0.63rem">└ ' + esc(c.name) + '</td>';
+                html += '<td>' + cReady + '</td>';
+                html += '<td style="font-size:0.63rem;color:#8b949e">' + esc(c.state) + '</td>';
+                html += '<td colspan="' + (hasMetrics ? 6 : 4) + '" style="font-size:0.6rem;color:#484f58">' + esc(c.image) + '</td></tr>';
+              }
+            }
+          }
+          html += '</table>';
+
+          if (podsData.pods.length === 0) {
+            html = '<span style="color:#8b949e;font-style:italic">No pods found</span>';
+          }
+
+          podsContent.innerHTML = html;
+        })
+        .catch(err => {
+          podsContent.textContent = 'Error: ' + err.message;
+        });
+    }
+
+    function closePods() {
+      podsPanel.style.display = 'none';
+      podsContent.innerHTML = '';
+      if (cy) cy.resize();
+    }
+
+    // --- Traffic detail panel ---
+    const trafficPanel = document.getElementById('trafficPanel');
+    const trafficTitle = document.getElementById('trafficTitle');
+    const trafficContent = document.getElementById('trafficContent');
+    const trafficRangeBar = document.getElementById('trafficRangeBar');
+    let trafficSource = null, trafficTarget = null;
+    let trafficRange = '24h';
+
+    function trafficFromMenu() {
+      if (!ctxEdge) return;
+      const edge = ctxEdge;
+      hideEdgeContextMenu();
+      openTraffic(edge.data('source'), edge.data('target'), edge.data());
+    }
+
+    function openTraffic(sourceId, targetId, edgeData) {
+      closeLogs();
+      closeShell();
+      closeDescribe();
+      closeEnv();
+      closePods();
+      closeTraffic();
+
+      trafficSource = sourceId;
+      trafficTarget = targetId;
+      trafficRange = '24h';
+
+      const srcLabel = cy.$id(sourceId).data('label') || sourceId;
+      const tgtLabel = cy.$id(targetId).data('label') || targetId;
+      trafficTitle.textContent = 'Traffic: ' + srcLabel + ' \u2192 ' + tgtLabel;
+
+      // Range buttons
+      trafficRangeBar.innerHTML = ['1h','6h','24h','7d'].map(r =>
+        '<button class="traffic-range-btn' + (r === '24h' ? ' active' : '') + '" onclick="loadTrafficRange(\'' + r + '\', this)">' + r + '</button>'
+      ).join('');
+
+      trafficContent.innerHTML = '<span style="color:#8b949e">Loading...</span>';
+      trafficPanel.style.display = 'flex';
+      if (cy) cy.resize();
+
+      renderTrafficPanel(edgeData);
+    }
+
+    function renderTrafficPanel(edgeData) {
+      const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const srcLabel = cy.$id(trafficSource).data('label') || trafficSource;
+      const tgtLabel = cy.$id(trafficTarget).data('label') || trafficTarget;
+      const conns = edgeData.connCount || 0;
+      const errs = edgeData.errCount || 0;
+      const bidir = edgeData.bidir || false;
+      const ports = edgeData.ports || [];
+      const pods = edgeData.pods || [];
+      const states = edgeData.states || null;
+      const kindLabels = { traffic: 'Observed traffic', env_ref: 'Env reference', code_ref: 'Code reference', ingress_backend: 'Ingress backend', selector: 'Selector' };
+
+      let html = '<div style="display:flex;gap:1.5rem;flex-wrap:wrap">';
+
+      // Left column: summary + states + ports.
+      html += '<div style="flex:1;min-width:250px">';
+
+      // Summary.
+      html += '<div class="traffic-summary">';
+      html += '<div class="traffic-stat"><span class="traffic-stat-label">Source</span><span class="traffic-stat-value" style="color:#58a6ff">' + esc(srcLabel) + '</span></div>';
+      html += '<div class="traffic-stat"><span class="traffic-stat-label">Target</span><span class="traffic-stat-value" style="color:#58a6ff">' + esc(tgtLabel) + '</span></div>';
+      html += '<div class="traffic-stat"><span class="traffic-stat-label">Type</span><span class="traffic-stat-value">' + esc(kindLabels[edgeData.kind] || edgeData.kind) + '</span></div>';
+      html += '<div class="traffic-stat"><span class="traffic-stat-label">Direction</span><span class="traffic-stat-value">' + (bidir ? '\u21C4 Bidirectional' : '\u2192 One-way') + '</span></div>';
+      html += '<div class="traffic-stat"><span class="traffic-stat-label">Connections</span><span class="traffic-stat-value" style="color:#3fb950">' + conns + '</span></div>';
+      if (errs > 0) {
+        html += '<div class="traffic-stat"><span class="traffic-stat-label">Errors</span><span class="traffic-stat-value" style="color:#f85149">' + errs + '</span></div>';
+      }
+      html += '</div>';
+
+      // TCP state breakdown.
+      if (states) {
+        const total = (states.established || 0) + (states.time_wait || 0) + (states.syn_sent || 0) + (states.close_wait || 0);
+        if (total > 0) {
+          html += '<div style="margin-top:0.75rem"><div class="traffic-chart-title">TCP States</div>';
+          html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.25rem">';
+          if (states.established) html += '<span style="color:#3fb950;font-size:0.7rem">ESTABLISHED: ' + states.established + '</span>';
+          if (states.time_wait) html += '<span style="color:#8b949e;font-size:0.7rem">TIME_WAIT: ' + states.time_wait + '</span>';
+          if (states.syn_sent) html += '<span style="color:#f85149;font-size:0.7rem">SYN_SENT: ' + states.syn_sent + '</span>';
+          if (states.close_wait) html += '<span style="color:#d29922;font-size:0.7rem">CLOSE_WAIT: ' + states.close_wait + '</span>';
+          html += '</div>';
+          // State bar.
+          html += '<div style="display:flex;height:6px;border-radius:3px;overflow:hidden;margin-top:0.25rem;background:#21262d">';
+          if (states.established) html += '<div style="width:' + (states.established/total*100) + '%;background:#3fb950"></div>';
+          if (states.time_wait) html += '<div style="width:' + (states.time_wait/total*100) + '%;background:#8b949e"></div>';
+          if (states.syn_sent) html += '<div style="width:' + (states.syn_sent/total*100) + '%;background:#f85149"></div>';
+          if (states.close_wait) html += '<div style="width:' + (states.close_wait/total*100) + '%;background:#d29922"></div>';
+          html += '</div></div>';
+        }
+      }
+
+      // Port breakdown.
+      if (ports.length > 0) {
+        html += '<div style="margin-top:0.75rem"><div class="traffic-chart-title">Ports</div>';
+        html += '<table class="pods-table" style="margin-top:0.25rem"><tr><th>Port</th><th>Conns</th><th>Errors</th></tr>';
+        for (const p of ports) {
+          html += '<tr><td style="color:#79c0ff">:' + p.port + '</td>';
+          html += '<td style="color:#3fb950">' + p.conns + '</td>';
+          html += '<td>' + (p.errors > 0 ? '<span style="color:#f85149">' + p.errors + '</span>' : '<span style="color:#484f58">0</span>') + '</td></tr>';
+        }
+        html += '</table></div>';
+      }
+
+      html += '</div>'; // end left column
+
+      // Right column: pod breakdown + history chart.
+      html += '<div style="flex:1;min-width:300px">';
+
+      // Per-pod breakdown.
+      if (pods.length > 0) {
+        html += '<div><div class="traffic-chart-title">Pod Breakdown</div>';
+        html += '<table class="pods-table" style="margin-top:0.25rem"><tr><th>Pod</th><th>Conns</th><th>Errors</th></tr>';
+        for (const p of pods) {
+          html += '<tr><td style="color:#58a6ff;white-space:nowrap;max-width:250px;overflow:hidden;text-overflow:ellipsis" title="' + esc(p.pod) + '">' + esc(p.pod) + '</td>';
+          html += '<td style="color:#3fb950">' + p.conns + '</td>';
+          html += '<td>' + (p.errors > 0 ? '<span style="color:#f85149">' + p.errors + '</span>' : '<span style="color:#484f58">0</span>') + '</td></tr>';
+        }
+        html += '</table></div>';
+      }
+
+      // History chart.
+      html += '<div class="traffic-chart-wrap" style="margin-top:' + (pods.length > 0 ? '0.75rem' : '0') + '"><div class="traffic-chart-title">Connection History (' + trafficRange + ')</div>';
+      html += '<div id="trafficChartContainer"><span style="color:#8b949e">Loading history...</span></div></div>';
+
+      html += '</div>'; // end right column
+      html += '</div>'; // end flex container
+
+      trafficContent.innerHTML = html;
+
+      // Fetch history.
+      fetchTrafficHistory();
+    }
+
+    function fetchTrafficHistory() {
+      const container = document.getElementById('trafficChartContainer');
+      if (!container) return;
+      container.innerHTML = '<span style="color:#8b949e">Loading...</span>';
+
+      fetch('/api/history?source=' + encodeURIComponent(trafficSource) +
+            '&target=' + encodeURIComponent(trafficTarget) +
+            '&range=' + encodeURIComponent(trafficRange))
+        .then(r => {
+          if (!r.ok) return r.text().then(t => { throw new Error(t); });
+          return r.json();
+        })
+        .then(buckets => {
+          renderTrafficChart(buckets || [], container);
+        })
+        .catch(err => {
+          container.innerHTML = '<span style="color:#f85149">Error: ' + err.message + '</span>';
+        });
+    }
+
+    function renderTrafficChart(buckets, container) {
+      if (buckets.length === 0) {
+        container.innerHTML = '<span style="color:#8b949e;font-style:italic">No history data for this range</span>';
+        return;
+      }
+
+      let maxVal = 1;
+      for (const b of buckets) {
+        const total = b.conns + b.errors;
+        if (total > maxVal) maxVal = total;
+      }
+
+      let html = '<div class="traffic-chart">';
+      for (const b of buckets) {
+        const connH = Math.max(1, (b.conns / maxVal) * 100);
+        const errH = Math.max(0, (b.errors / maxVal) * 100);
+        const time = new Date(b.timestamp * 1000);
+        const tip = time.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + '\\n' + b.conns + ' conn' + (b.errors > 0 ? ', ' + b.errors + ' err' : '');
+        html += '<div class="traffic-bar" style="height:100%" title="' + tip + '">';
+        html += '<div class="traffic-bar-conn" style="height:' + connH + '%"></div>';
+        if (b.errors > 0) {
+          html += '<div class="traffic-bar-err" style="height:' + errH + '%"></div>';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+
+      // Time labels.
+      if (buckets.length > 0) {
+        const first = new Date(buckets[0].timestamp * 1000);
+        const last = new Date(buckets[buckets.length - 1].timestamp * 1000);
+        const fmt = d => d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+        html += '<div class="traffic-chart-labels"><span>' + fmt(first) + '</span><span>' + fmt(last) + '</span></div>';
+      }
+
+      // Legend + peak stats.
+      let totalConns = 0, totalErrs = 0, peakConns = 0;
+      for (const b of buckets) {
+        totalConns += b.conns;
+        totalErrs += b.errors;
+        if (b.conns > peakConns) peakConns = b.conns;
+      }
+      html += '<div style="margin-top:0.5rem;font-size:0.65rem;color:#8b949e">';
+      html += '<span style="color:#39d353">\u25A0</span> Connections';
+      if (totalErrs > 0) html += ' &nbsp; <span style="color:#f85149">\u25A0</span> Errors';
+      html += ' &nbsp;&middot;&nbsp; Total: ' + totalConns.toLocaleString() + ' conn';
+      if (totalErrs > 0) html += ', ' + totalErrs.toLocaleString() + ' err';
+      html += ' &nbsp;&middot;&nbsp; Peak: ' + peakConns + '/5min';
+      html += '</div>';
+
+      container.innerHTML = html;
+    }
+
+    function loadTrafficRange(range, btn) {
+      trafficRange = range;
+      // Update active button.
+      trafficRangeBar.querySelectorAll('.traffic-range-btn').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      // Update chart title.
+      const titleEl = trafficContent.querySelector('.traffic-chart-title');
+      if (titleEl) titleEl.textContent = 'Connection History (' + range + ')';
+      fetchTrafficHistory();
+    }
+
+    function closeTraffic() {
+      trafficPanel.style.display = 'none';
+      trafficContent.innerHTML = '';
+      trafficSource = null;
+      trafficTarget = null;
       if (cy) cy.resize();
     }
 

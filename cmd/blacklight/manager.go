@@ -449,6 +449,15 @@ func mergeSnapshots(scans []timedSnapshot) *model.TrafficSnapshot {
 		for _, c := range ts.snap.Connections {
 			key := c.SourceWorkload + "\t" + c.TargetService
 			if existing, ok := aggr[key]; ok {
+				// Take details from the snapshot with the highest total, or
+				// any snapshot that has details when existing doesn't.
+				total := c.ConnCount + c.ErrorCount
+				existingTotal := existing.ConnCount + existing.ErrorCount
+				if total > existingTotal || (existing.States == nil && c.States != nil) {
+					existing.Ports = c.Ports
+					existing.Pods = c.Pods
+					existing.States = c.States
+				}
 				if c.ConnCount > existing.ConnCount {
 					existing.ConnCount = c.ConnCount
 				}
@@ -456,12 +465,8 @@ func mergeSnapshots(scans []timedSnapshot) *model.TrafficSnapshot {
 					existing.ErrorCount = c.ErrorCount
 				}
 			} else {
-				aggr[key] = &model.TrafficConnection{
-					SourceWorkload: c.SourceWorkload,
-					TargetService:  c.TargetService,
-					ConnCount:      c.ConnCount,
-					ErrorCount:     c.ErrorCount,
-				}
+				copy := c
+				aggr[key] = &copy
 			}
 		}
 	}
@@ -522,12 +527,21 @@ func translateTraffic(snap *model.TrafficSnapshot, idMap map[string]string) *mod
 		if existing, ok := aggr[key]; ok {
 			existing.ConnCount += c.ConnCount
 			existing.ErrorCount += c.ErrorCount
+			// Keep details from whichever has more data.
+			if existing.States == nil && c.States != nil {
+				existing.Ports = c.Ports
+				existing.Pods = c.Pods
+				existing.States = c.States
+			}
 		} else {
 			aggr[key] = &model.TrafficConnection{
 				SourceWorkload: src,
 				TargetService:  tgt,
 				ConnCount:      c.ConnCount,
 				ErrorCount:     c.ErrorCount,
+				Ports:          c.Ports,
+				Pods:           c.Pods,
+				States:         c.States,
 			}
 		}
 	}

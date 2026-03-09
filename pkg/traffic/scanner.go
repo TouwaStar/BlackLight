@@ -134,8 +134,8 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 	type extKey struct{ wid, ip string }
 
 	type podResult struct {
-		wid     string
-		entries []tcpEntry
+		wid    string
+		result tcpResult
 	}
 
 	// Fan out exec calls with bounded concurrency.
@@ -170,7 +170,7 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 				s.failedPods.Store(pr.name, time.Now().Add(ExecCooldown))
 				return
 			}
-			resultCh <- podResult{wid: wid, entries: parseProcNetTCP(raw)}
+			resultCh <- podResult{wid: wid, result: parseProcNetTCP(raw)}
 		}(wid, pr)
 	}
 
@@ -180,14 +180,45 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 		close(resultCh)
 	}()
 
-	// Aggregate results progressively.
-	connCounts := make(map[connKey]int)
-	errCounts := make(map[connKey]int)
+	// Aggregate results progressively, tracking per-port, per-pod, and per-state details.
+	type connDetail struct {
+		conns  int
+		errors int
+		ports  map[uint16][2]int // port → [conns, errors]
+		pods   map[string][2]int // pod name → [conns, errors]
+		states [4]int            // [established, timeWait, synSent, closeWait]
+	}
+	details := make(map[connKey]*connDetail)
 	extPerIP := make(map[extKey]int)
 	lastNotify := time.Time{}
 
+	getDetail := func(k connKey) *connDetail {
+		d := details[k]
+		if d == nil {
+			d = &connDetail{
+				ports: make(map[uint16][2]int),
+				pods:  make(map[string][2]int),
+			}
+			details[k] = d
+		}
+		return d
+	}
+
+	// Reverse lookup: wid → pod name (for per-pod breakdown).
+	widPodName := make(map[string]string, len(workloadPods))
+	for wid, pr := range workloadPods {
+		widPodName[wid] = pr.name
+	}
+
 	for res := range resultCh {
-		for _, e := range res.entries {
+		podName := widPodName[res.wid]
+		listenPorts := res.result.listenPorts
+		for _, e := range res.result.entries {
+			// Skip inbound connections (local port is a listening port).
+			// These will be captured correctly from the connecting pod's scan.
+			if listenPorts[e.LocalPort] {
+				continue
+			}
 			remoteIP := e.RemoteIP.String()
 			var targetID string
 			if tid, ok := serviceClusterIPs[remoteIP]; ok {
@@ -197,10 +228,38 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 			}
 			if targetID != "" {
 				key := connKey{res.wid, targetID}
+				d := getDetail(key)
 				if e.IsError {
-					errCounts[key]++
+					d.errors++
 				} else {
-					connCounts[key]++
+					d.conns++
+				}
+				// Port breakdown.
+				pc := d.ports[e.RemotePort]
+				if e.IsError {
+					pc[1]++
+				} else {
+					pc[0]++
+				}
+				d.ports[e.RemotePort] = pc
+				// Pod breakdown.
+				pp := d.pods[podName]
+				if e.IsError {
+					pp[1]++
+				} else {
+					pp[0]++
+				}
+				d.pods[podName] = pp
+				// State breakdown.
+				switch e.State {
+				case tcpEstablished:
+					d.states[0]++
+				case tcpTimeWait:
+					d.states[1]++
+				case tcpSynSent:
+					d.states[2]++
+				case tcpCloseWait:
+					d.states[3]++
 				}
 			} else if !e.IsError && !knownIPs[remoteIP] && !isPrivateIP(e.RemoteIP) {
 				extPerIP[extKey{res.wid, remoteIP}]++
@@ -211,19 +270,12 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 		// partials cause visual flicker as edges toggle active→idle→active.
 		if onProgress != nil && time.Since(execNow) > PartialResultDelay && time.Since(lastNotify) > time.Second {
 			partial := &model.TrafficSnapshot{Timestamp: time.Now().UnixMilli()}
-			pKeys := make(map[connKey]bool)
-			for k := range connCounts {
-				pKeys[k] = true
-			}
-			for k := range errCounts {
-				pKeys[k] = true
-			}
-			for key := range pKeys {
+			for key, d := range details {
 				partial.Connections = append(partial.Connections, model.TrafficConnection{
 					SourceWorkload: key.source,
 					TargetService:  key.target,
-					ConnCount:      connCounts[key],
-					ErrorCount:     errCounts[key],
+					ConnCount:      d.conns,
+					ErrorCount:     d.errors,
 				})
 			}
 			onProgress(partial)
@@ -232,21 +284,37 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 	}
 
 	snap := &model.TrafficSnapshot{Timestamp: time.Now().UnixMilli()}
-	// Collect all keys from both maps.
-	allKeys := make(map[connKey]bool)
-	for k := range connCounts {
-		allKeys[k] = true
-	}
-	for k := range errCounts {
-		allKeys[k] = true
-	}
-	for key := range allKeys {
-		snap.Connections = append(snap.Connections, model.TrafficConnection{
+	for key, d := range details {
+		tc := model.TrafficConnection{
 			SourceWorkload: key.source,
 			TargetService:  key.target,
-			ConnCount:      connCounts[key],
-			ErrorCount:     errCounts[key],
+			ConnCount:      d.conns,
+			ErrorCount:     d.errors,
+			States:         &model.StateBreakdown{},
+		}
+		// Port breakdown (sorted by total count, top 10).
+		for port, counts := range d.ports {
+			tc.Ports = append(tc.Ports, model.PortCount{Port: port, Conns: counts[0], Errors: counts[1]})
+		}
+		sort.Slice(tc.Ports, func(i, j int) bool {
+			return (tc.Ports[i].Conns + tc.Ports[i].Errors) > (tc.Ports[j].Conns + tc.Ports[j].Errors)
 		})
+		if len(tc.Ports) > 10 {
+			tc.Ports = tc.Ports[:10]
+		}
+		// Pod breakdown (sorted by total count).
+		for pod, counts := range d.pods {
+			tc.Pods = append(tc.Pods, model.PodTraffic{Pod: pod, Conns: counts[0], Errors: counts[1]})
+		}
+		sort.Slice(tc.Pods, func(i, j int) bool {
+			return (tc.Pods[i].Conns + tc.Pods[i].Errors) > (tc.Pods[j].Conns + tc.Pods[j].Errors)
+		})
+		// State breakdown populated by tcpEntry state.
+		tc.States.Established = d.states[0]
+		tc.States.TimeWait = d.states[1]
+		tc.States.SynSent = d.states[2]
+		tc.States.CloseWait = d.states[3]
+		snap.Connections = append(snap.Connections, tc)
 	}
 	// Classify external IPs as cloud infra or truly external via cached reverse DNS.
 	// Parallelize lookups — sequential DNS for 300+ IPs takes minutes.
@@ -331,6 +399,7 @@ func (s *Scanner) execReadTCP(ctx context.Context, namespace, podName, container
 const (
 	tcpEstablished = "01"
 	tcpSynSent     = "02"
+	tcpListen      = "0A"
 	tcpTimeWait    = "06"
 	tcpCloseWait   = "08"
 )
@@ -340,11 +409,19 @@ type tcpEntry struct {
 	LocalPort  uint16
 	RemoteIP   net.IP
 	RemotePort uint16
-	IsError    bool // SYN_SENT or CLOSE_WAIT
+	IsError    bool   // SYN_SENT or CLOSE_WAIT
+	State      string // raw hex state: "01", "02", "06", "08"
 }
 
-func parseProcNetTCP(raw string) []tcpEntry {
-	var entries []tcpEntry
+// tcpResult holds parsed /proc/net/tcp output with listening ports identified.
+type tcpResult struct {
+	entries      []tcpEntry
+	listenPorts  map[uint16]bool // ports in LISTEN state
+}
+
+func parseProcNetTCP(raw string) tcpResult {
+	var result tcpResult
+	result.listenPorts = make(map[uint16]bool)
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "sl") {
@@ -355,6 +432,13 @@ func parseProcNetTCP(raw string) []tcpEntry {
 			continue
 		}
 		state := fields[3]
+		// Track LISTEN ports so we can identify inbound connections.
+		if state == tcpListen {
+			if _, port, ok := parseHexAddr(fields[1]); ok {
+				result.listenPorts[port] = true
+			}
+			continue
+		}
 		isError := state == tcpSynSent || state == tcpCloseWait
 		if state != tcpEstablished && state != tcpTimeWait && !isError {
 			continue
@@ -364,13 +448,13 @@ func parseProcNetTCP(raw string) []tcpEntry {
 		if !ok1 || !ok2 {
 			continue
 		}
-		entries = append(entries, tcpEntry{
+		result.entries = append(result.entries, tcpEntry{
 			LocalIP: localIP, LocalPort: localPort,
 			RemoteIP: remoteIP, RemotePort: remotePort,
-			IsError: isError,
+			IsError: isError, State: state,
 		})
 	}
-	return entries
+	return result
 }
 
 func parseHexAddr(s string) (net.IP, uint16, bool) {
