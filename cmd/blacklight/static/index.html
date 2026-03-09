@@ -933,35 +933,36 @@
       cy.on('mouseover', 'node', function(evt) {
         const node = evt.target;
         const d = node.data();
-        let html = `<strong>${d.fullLabel}</strong><br>Kind: ${d.kind}`;
-        if (d.purpose) html += `<br>Purpose: ${d.purpose}`;
+        const esc = escapeHtml;
+        let html = `<strong>${esc(d.fullLabel)}</strong><br>Kind: ${esc(d.kind)}`;
+        if (d.purpose) html += `<br>Purpose: ${esc(d.purpose)}`;
 
         // Show resource-specific metadata.
         const m = d.meta || {};
         if (d.kind === 'Deployment' || d.kind === 'StatefulSet') {
           html += `<br>Replicas: ${m.readyReplicas ?? 0}/${m.replicas ?? 0} ready`;
-          if (m.strategy) html += `<br>Strategy: ${m.strategy}`;
+          if (m.strategy) html += `<br>Strategy: ${esc(m.strategy)}`;
         } else if (d.kind === 'DaemonSet') {
           html += `<br>Nodes: ${m.ready ?? 0}/${m.desired ?? 0} ready`;
         } else if (d.kind === 'CronJob') {
-          if (m.schedule) html += `<br>Schedule: ${m.schedule}`;
+          if (m.schedule) html += `<br>Schedule: ${esc(m.schedule)}`;
           if (m.lastSchedule) html += `<br>Last run: ${timeAgo(m.lastSchedule)}`;
         } else if (d.kind === 'Job') {
           if (m.succeeded) html += `<br>Succeeded: ${m.succeeded}`;
           if (m.failed) html += `<br><span style="color:#f85149">Failed: ${m.failed}</span>`;
         } else if (d.kind === 'Service') {
-          if (m.type) html += `<br>Type: ${m.type}`;
-          if (m.clusterIP && m.clusterIP !== 'None') html += `<br>ClusterIP: ${m.clusterIP}`;
-          if (m.ports && m.ports.length) html += `<br>Ports: ${m.ports.join(', ')}`;
+          if (m.type) html += `<br>Type: ${esc(m.type)}`;
+          if (m.clusterIP && m.clusterIP !== 'None') html += `<br>ClusterIP: ${esc(m.clusterIP)}`;
+          if (m.ports && m.ports.length) html += `<br>Ports: ${esc(m.ports.join(', '))}`;
         } else if (d.kind === 'Ingress') {
-          if (m.class) html += `<br>Class: ${m.class}`;
-          if (m.hosts && m.hosts.length) html += `<br>Hosts: ${m.hosts.join(', ')}`;
+          if (m.class) html += `<br>Class: ${esc(m.class)}`;
+          if (m.hosts && m.hosts.length) html += `<br>Hosts: ${esc(m.hosts.join(', '))}`;
         }
         if (m.images && m.images.length) {
           for (const img of m.images) {
             // Show short image name (strip registry prefix if long).
             const short = img.includes('/') && img.length > 50 ? '...' + img.slice(img.lastIndexOf('/')) : img;
-            html += `<br><span style="color:#79c0ff">${short}</span>`;
+            html += `<br><span style="color:#79c0ff">${esc(short)}</span>`;
           }
         }
 
@@ -1010,14 +1011,14 @@
         if (inbound.length > 0) {
           html += `<br><br><strong style="color:#39d353">Inbound</strong>`;
           for (const t of inbound) {
-            html += `<br>&larr; ${t.name}: ${t.conn} conn`;
+            html += `<br>&larr; ${esc(t.name)}: ${t.conn} conn`;
             if (t.err > 0) html += ` <span style="color:#f85149">(${t.err} err)</span>`;
           }
         }
         if (outbound.length > 0) {
           html += `<br><br><strong style="color:#58a6ff">Outbound</strong>`;
           for (const t of outbound) {
-            html += `<br>&rarr; ${t.name}: ${t.conn} conn`;
+            html += `<br>&rarr; ${esc(t.name)}: ${t.conn} conn`;
             if (t.err > 0) html += ` <span style="color:#f85149">(${t.err} err)</span>`;
           }
         }
@@ -1028,14 +1029,15 @@
       cy.on('mouseover', 'edge', function(evt) {
         const edge = evt.target;
         const d = edge.data();
+        const esc = escapeHtml;
         const srcLabel = edge.source().data('label') || d.source;
         const tgtLabel = edge.target().data('label') || d.target;
         const bidir = edge.style('source-arrow-shape') !== 'none';
         const arrow = bidir ? ' ⇄ ' : ' → ';
-        let html = `<strong>${srcLabel}${arrow}${tgtLabel}</strong>`;
+        let html = `<strong>${esc(srcLabel)}${arrow}${esc(tgtLabel)}</strong>`;
         const kindLabels = { traffic: 'Observed traffic', env_ref: 'Env reference', code_ref: 'Code reference', ingress_backend: 'Ingress backend', selector: 'Selector' };
-        html += `<br><span style="color:#8b949e">${kindLabels[d.kind] || d.kind}</span>`;
-        if (d.detail && d.detail !== 'observed') html += `<br>${d.detail}`;
+        html += `<br><span style="color:#8b949e">${kindLabels[d.kind] || esc(d.kind)}</span>`;
+        if (d.detail && d.detail !== 'observed') html += `<br>${esc(d.detail)}`;
         if (d.connCount > 0) html += `<br>Active connections: ${d.connCount}`;
         if (d.errCount > 0) html += `<br><span style="color:#f85149">Errors: ${d.errCount} (SYN_SENT/CLOSE_WAIT)</span>`;
         if (d.connCount > 0 || d.errCount > 0) html += `<br><span style="color:#484f58;font-size:0.65rem">Right-click for details</span>`;
@@ -1305,7 +1307,7 @@
     }
 
     function escapeHtml(s) {
-      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
     // Re-render visible log lines based on current filters and search.
@@ -1619,7 +1621,7 @@
           return resp.json();
         })
         .then(data => {
-          const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+          const esc = escapeHtml;
           let html = '<div style="color:#8b949e;font-size:0.65rem;margin-bottom:0.5rem">Pod: ' +
             esc(data.pod) + '</div>';
           for (const c of data.containers) {
@@ -1676,7 +1678,7 @@
       podsPanel.style.display = 'flex';
       if (cy) cy.resize();
 
-      const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      const esc = escapeHtml;
       const qs = 'kind=' + encodeURIComponent(kind) + '&namespace=' + encodeURIComponent(namespace) + '&name=' + encodeURIComponent(name);
 
       // Fetch pods and metrics in parallel.
@@ -1799,7 +1801,7 @@
     }
 
     function renderTrafficPanel(edgeData) {
-      const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const esc = s => escapeHtml(String(s));
       const srcLabel = cy.$id(trafficSource).data('label') || trafficSource;
       const tgtLabel = cy.$id(trafficTarget).data('label') || trafficTarget;
       const conns = edgeData.connCount || 0;
@@ -1878,7 +1880,7 @@
       }
 
       // History chart.
-      html += '<div class="traffic-chart-wrap" style="margin-top:' + (pods.length > 0 ? '0.75rem' : '0') + '"><div class="traffic-chart-title">Connection History (' + trafficRange + ')</div>';
+      html += '<div class="traffic-chart-wrap" style="margin-top:' + (pods.length > 0 ? '0.75rem' : '0') + '"><div class="traffic-chart-title" id="historyChartTitle">Connection History (' + trafficRange + ')</div>';
       html += '<div id="trafficChartContainer"><span style="color:#8b949e">Loading history...</span></div></div>';
 
       html += '</div>'; // end right column
@@ -1969,7 +1971,7 @@
       trafficRangeBar.querySelectorAll('.traffic-range-btn').forEach(b => b.classList.remove('active'));
       if (btn) btn.classList.add('active');
       // Update chart title.
-      const titleEl = trafficContent.querySelector('.traffic-chart-title');
+      const titleEl = document.getElementById('historyChartTitle');
       if (titleEl) titleEl.textContent = 'Connection History (' + range + ')';
       fetchTrafficHistory();
     }

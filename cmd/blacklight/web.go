@@ -702,7 +702,6 @@ func (b *wsBridge) readLoop(cancel context.CancelFunc) {
 	}
 }
 
-
 // workloadParams extracts and validates kind/namespace/name query parameters.
 func workloadParams(r *http.Request) (kind, namespace, name string, err error) {
 	kind = r.URL.Query().Get("kind")

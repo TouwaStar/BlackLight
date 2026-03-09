@@ -93,13 +93,23 @@ CLI flags override config file values.
 
 - **Live graph** — nodes and edges update in real-time via SSE
 - **Traffic density** — edge thickness scales with connection count (log-scale)
+- **Bidirectional arrows** — edges show arrows in both directions when traffic flows both ways
 - **Error edges** — dashed red lines for connections in error states (SYN_SENT / CLOSE_WAIT)
 - **Dead service filter** — toggle to highlight services with zero traffic
 - **Search** — filter nodes by name or label in real-time
+- **Global log search** — search across all pod logs at once, highlights matching services on the graph
 - **Context & namespace selectors** — switch cluster context or namespace without restarting
 - **Draggable layout** — positions persist across page reloads and restarts
 - **Auto-arrange** — toggle deterministic force-directed layout (fcose)
-- **Node details** — hover to see kind, purpose, first seen, last traffic, lifetime connections, inbound/outbound peers with counts, external/cloud traffic
+- **Node details** — hover to see kind, purpose, replicas, images, first seen, last traffic, lifetime connections, inbound/outbound peers with counts, external/cloud traffic
+- **Right-click context menu** — access node actions (Logs, Shell, Describe, Env, Pods, Restart) and edge actions (Traffic Details)
+- **Pod log streaming** — stream live pod logs with level filtering (CRIT/ERR/WARN/INFO/DEBUG), search, and pause
+- **Interactive shell** — open a terminal session into any pod directly from the UI (xterm.js)
+- **Resource describe** — kubectl-describe-like output for any resource, including events
+- **Environment variables** — view resolved env vars per container, with ConfigMap/Secret source tracking
+- **Pod list with metrics** — see all pods for a workload with status, restarts, age, and CPU/memory usage (requires metrics-server)
+- **Traffic details panel** — right-click an edge to see per-port breakdown, per-pod connection distribution, TCP state analysis (ESTABLISHED/TIME_WAIT/SYN_SENT/CLOSE_WAIT), and connection history charts
+- **Rolling restart** — restart Deployments, StatefulSets, or DaemonSets from the UI with confirmation
 - **Export** — download the current graph as JSON or Mermaid diagram from the UI
 
 ## Edge kinds
@@ -138,6 +148,14 @@ The web UI is backed by a REST + SSE API:
 | `/api/namespaces` | GET | Available namespaces in current context |
 | `/api/config` | POST | Switch context and/or namespace (`{"context":"...","namespace":"..."}`) |
 | `/api/events` | GET | SSE stream — pushes `graph` and `traffic` events in real-time |
+| `/api/logs` | GET | Stream pod logs (SSE) for a workload (`?kind=...&namespace=...&name=...&tail=200`) |
+| `/api/exec` | GET | WebSocket shell session into a pod (`?kind=...&namespace=...&name=...`) |
+| `/api/describe` | GET | kubectl-describe-like text output for a resource |
+| `/api/env` | GET | Resolved environment variables per container (includes ConfigMap/Secret sources) |
+| `/api/pods` | GET | List pods for a workload with status, restarts, age, node, and IP |
+| `/api/metrics` | GET | CPU and memory usage per pod (requires metrics-server) |
+| `/api/restart` | POST | Trigger a rolling restart of a Deployment, StatefulSet, or DaemonSet |
+| `/api/search-logs` | GET | Search logs across all workload pods (`?q=...`) — returns matching node IDs and hit counts |
 
 ## Requirements
 
