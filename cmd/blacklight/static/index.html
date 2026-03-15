@@ -22,26 +22,24 @@
       flex-direction: column;
     }
     header {
-      padding: 0.6rem 1.25rem;
+      padding: 0.4rem 0.75rem;
       background: #161b22;
       border-bottom: 1px solid #30363d;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
       flex-shrink: 0;
-      gap: 0.5rem;
-      flex-wrap: wrap;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
     }
-    h1 { font-size: 1.1rem; font-weight: 600; }
-    .controls { display: flex; gap: 0.75rem; align-items: center; }
+    .header-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    h1 { font-size: 1rem; font-weight: 600; white-space: nowrap; }
     a { color: #58a6ff; text-decoration: none; font-size: 0.8rem; }
     a:hover { text-decoration: underline; }
-    .hint { color: #484f58; font-size: 0.7rem; }
+    .hint { color: #484f58; font-size: 0.65rem; margin-left: auto; white-space: nowrap; }
     #status { font-size: 0.7rem; font-weight: 600; }
     #searchBox {
       font-family: inherit; font-size: 0.7rem;
       background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
-      border-radius: 4px; padding: 0.25rem 0.5rem; width: 160px;
+      border-radius: 4px; padding: 0.25rem 0.5rem; width: 140px;
       outline: none; transition: border-color 0.15s;
     }
     #searchBox:focus { border-color: #58a6ff; }
@@ -79,14 +77,18 @@
     }
     #tooltip strong { color: #e6edf3; }
     .legend {
-      display: flex; gap: 1rem; align-items: center; font-size: 0.7rem; color: #8b949e;
+      display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+      font-size: 0.65rem; color: #8b949e;
     }
     .legend-item { display: flex; align-items: center; gap: 0.3rem; cursor: default; }
     .legend-item[data-kind] { cursor: pointer; user-select: none; transition: opacity 0.15s; }
     .legend-item[data-kind]:hover { color: #e6edf3; }
     .legend-item[data-kind].kind-hidden { opacity: 0.3; text-decoration: line-through; }
+    .legend-sep {
+      width: 1px; height: 12px; background: #30363d; flex-shrink: 0;
+    }
     .legend-dot {
-      width: 10px; height: 10px; border-radius: 2px; display: inline-block;
+      width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex-shrink: 0;
     }
     #contextMenu, #edgeContextMenu {
       display: none; position: fixed; z-index: 200;
@@ -305,10 +307,10 @@
     #globalLogSearch {
       font-family: inherit; font-size: 0.7rem;
       background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
-      border-radius: 4px; padding: 0.25rem 0.5rem; width: 200px;
+      border-radius: 4px; padding: 0.25rem 0.5rem; width: 160px;
       outline: none; transition: border-color 0.15s;
     }
-    #globalLogSearch:focus { border-color: #a371f7; }
+    #globalLogSearch:focus { border-color: #a371f7; width: 200px; }
     #globalLogSearch::placeholder { color: #484f58; }
     #globalLogSearch.searching { border-color: #d29922; }
     #globalSearchStatus {
@@ -320,38 +322,70 @@
       padding: 0.1rem 0.4rem; cursor: pointer; display: none;
     }
     #globalSearchClear:hover { border-color: #f85149; color: #f85149; }
+    #globalTimeRange {
+      display: flex; gap: 0.2rem; align-items: center; margin-left: 0.5rem;
+    }
+    .time-range-btn {
+      font-family: inherit; font-size: 0.65rem; font-weight: 600;
+      background: transparent; color: #8b949e; border: 1px solid #30363d;
+      border-radius: 4px; padding: 0.15rem 0.5rem; cursor: pointer;
+      transition: all 0.15s;
+    }
+    .time-range-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+    .time-range-btn.active { background: #388bfd22; border-color: #58a6ff; color: #58a6ff; }
+    .time-range-btn.active-hist { background: #d2992222; border-color: #d29922; color: #d29922; }
+    #historyIndicator {
+      display: none; font-size: 0.65rem; color: #d29922; font-weight: 600;
+      margin-left: 0.3rem;
+    }
+    .topo-node {
+      font-size: 9px; color: #8b949e; text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
   </style>
 </head>
 <body>
   <header>
-    <h1>Blacklight</h1>
-    <div class="legend">
-      <div class="legend-item" data-kind="Ingress" onclick="toggleKind(this)"><span class="legend-dot" style="background:#f0883e"></span> Ingress</div>
-      <div class="legend-item" data-kind="Deployment" onclick="toggleKind(this)"><span class="legend-dot" style="background:#3fb950"></span> Deployment</div>
-      <div class="legend-item" data-kind="StatefulSet" onclick="toggleKind(this)"><span class="legend-dot" style="background:#a371f7"></span> StatefulSet</div>
-      <div class="legend-item" data-kind="DaemonSet" onclick="toggleKind(this)"><span class="legend-dot" style="background:#d29922"></span> DaemonSet</div>
-      <div class="legend-item" data-kind="CronJob" onclick="toggleKind(this)"><span class="legend-dot" style="background:#79c0ff"></span> CronJob</div>
-      <div class="legend-item" data-kind="Job" onclick="toggleKind(this)"><span class="legend-dot" style="background:#7ee787"></span> Job</div>
-      <div class="legend-item" data-kind="Service" onclick="toggleKind(this)"><span class="legend-dot" style="background:#58a6ff"></span> Service</div>
-      <div class="legend-item" data-kind="Cloud" onclick="toggleKind(this)"><span class="legend-dot" style="background:#f78166"></span> Cloud</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#39d353;border-radius:50%"></span> Active traffic</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#f85149;border-radius:50%"></span> Connection errors</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#0d1117;border:2px solid #f0883e"></span> External traffic</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#484f58;border:1px dashed #8b949e"></span> No traffic observed</div>
-    </div>
-    <div class="controls">
-      <span id="status" style="color:#d29922">connecting...</span>
+    <div class="header-row">
+      <h1>Blacklight</h1>
+      <span id="status" style="color:#d29922;font-size:0.7rem;font-weight:600">connecting...</span>
       <select id="contextSelect" class="config-select" onchange="onConfigChange()"></select>
       <select id="namespaceSelect" class="config-select" onchange="onConfigChange()"></select>
       <input id="searchBox" type="text" placeholder="Search services..." oninput="onSearch(this.value)">
       <input id="globalLogSearch" type="text" placeholder="Search all logs... (Enter)" onkeydown="if(event.key==='Enter')globalLogSearchRun()">
       <span id="globalSearchStatus"></span>
       <button id="globalSearchClear" onclick="globalLogSearchClear()">Clear</button>
+      <div id="globalTimeRange">
+        <button class="time-range-btn active" onclick="setGlobalRange('live', this)">Live</button>
+        <button class="time-range-btn" onclick="setGlobalRange('1h', this)">1h</button>
+        <button class="time-range-btn" onclick="setGlobalRange('6h', this)">6h</button>
+        <button class="time-range-btn" onclick="setGlobalRange('24h', this)">24h</button>
+        <button class="time-range-btn" onclick="setGlobalRange('7d', this)">7d</button>
+        <span id="historyIndicator">HISTORICAL</span>
+      </div>
+      <button id="topoToggle" class="filter-btn" onclick="toggleTopology()">Topology</button>
       <button id="autoArrange" class="filter-btn active" onclick="toggleAutoArrange()">Auto arrange: ON</button>
       <button id="deadFilter" class="filter-btn" onclick="toggleDeadFilter()">Show dead services</button>
-      <span class="hint">scroll to zoom &middot; drag to pan &middot; click node to highlight</span>
       <a href="/api/graph">JSON</a>
       <a href="/api/mermaid">Mermaid</a>
+    </div>
+    <div class="header-row">
+      <div class="legend">
+        <div class="legend-item" data-kind="Ingress" onclick="toggleKind(this)"><span class="legend-dot" style="background:#f0883e"></span> Ingress</div>
+        <div class="legend-item" data-kind="Deployment" onclick="toggleKind(this)"><span class="legend-dot" style="background:#3fb950"></span> Deployment</div>
+        <div class="legend-item" data-kind="StatefulSet" onclick="toggleKind(this)"><span class="legend-dot" style="background:#a371f7"></span> StatefulSet</div>
+        <div class="legend-item" data-kind="DaemonSet" onclick="toggleKind(this)"><span class="legend-dot" style="background:#d29922"></span> DaemonSet</div>
+        <div class="legend-item" data-kind="CronJob" onclick="toggleKind(this)"><span class="legend-dot" style="background:#79c0ff"></span> CronJob</div>
+        <div class="legend-item" data-kind="Job" onclick="toggleKind(this)"><span class="legend-dot" style="background:#7ee787"></span> Job</div>
+        <div class="legend-item" data-kind="Service" onclick="toggleKind(this)"><span class="legend-dot" style="background:#58a6ff"></span> Service</div>
+        <div class="legend-item" data-kind="Cloud" onclick="toggleKind(this)"><span class="legend-dot" style="background:#f78166"></span> Cloud</div>
+        <span class="legend-sep"></span>
+        <div class="legend-item"><span class="legend-dot" style="background:#39d353;border-radius:50%"></span> Active traffic</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#f85149;border-radius:50%"></span> Connection errors</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#0d1117;border:2px solid #f0883e"></span> External traffic</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#484f58;border:1px dashed #8b949e"></span> No traffic observed</div>
+      </div>
+      <span class="hint">scroll to zoom &middot; drag to pan &middot; click node to highlight</span>
     </div>
   </header>
   <div id="cy"></div>
@@ -460,12 +494,24 @@
         selector: 'node',
         style: {
           'label': 'data(label)', 'text-valign': 'center', 'text-halign': 'center',
+          'text-wrap': 'wrap', 'text-max-width': '200px',
           'font-size': 'mapData(deg, 0, 20, 11, 15)',
           'font-family': "'JetBrains Mono', 'SF Mono', Consolas, monospace",
           'color': '#e6edf3', 'text-outline-color': '#0d1117', 'text-outline-width': 2,
           'width': 'label', 'height': 'mapData(deg, 0, 20, 34, 52)', 'padding': 'mapData(deg, 0, 20, 12, 22)',
           'shape': 'round-rectangle', 'background-color': '#58a6ff',
           'border-width': 'mapData(deg, 0, 20, 1, 2.5)', 'border-color': '#30363d',
+        }
+      },
+      // Topology parent (K8s node) styling
+      {
+        selector: 'node.topo-parent',
+        style: {
+          'shape': 'round-rectangle', 'background-color': '#161b22',
+          'border-width': 1, 'border-color': '#30363d', 'border-style': 'dashed',
+          'text-valign': 'top', 'text-halign': 'center', 'text-margin-y': 8,
+          'font-size': 10, 'color': '#8b949e', 'padding': '30px',
+          'background-opacity': 0.6,
         }
       },
       ...Object.entries(KIND_COLORS).map(([kind, color]) => ({
@@ -558,6 +604,36 @@
     let _edgeIdCounter = 10000;
     let positionsDirty = false;
     let positionsLoaded = false;
+    let globalRange = 'live';       // 'live' | '1h' | '6h' | '24h' | '7d'
+    let topoActive = false;         // topology view mode
+    let topoData = null;            // cached topology data
+
+    // Build a display label with optional replica badge.
+    function nodeLabel(n) {
+      const m = n.meta || {};
+      const kind = n.kind;
+      let badge = '';
+      if (kind === 'Deployment' || kind === 'StatefulSet') {
+        const ready = m.readyReplicas ?? 0;
+        const total = m.replicas ?? 0;
+        if (total > 0) badge = ' [' + ready + '/' + total + ']';
+      } else if (kind === 'DaemonSet') {
+        const ready = m.ready ?? 0;
+        const desired = m.desired ?? 0;
+        if (desired > 0) badge = ' [' + ready + '/' + desired + ']';
+      }
+      return n.name + badge;
+    }
+
+    // Return protocol label string for an edge's ports.
+    function edgeProtocolLabel(ports) {
+      if (!ports || !ports.length) return '';
+      const protos = [];
+      for (const p of ports) {
+        if (p.protocol && !protos.includes(p.protocol)) protos.push(p.protocol);
+      }
+      return protos.join(', ');
+    }
 
     function graphFingerprint(graph) {
       const nodes = (graph.nodes || []).map(n => n.id).sort().join(',');
@@ -807,7 +883,7 @@
           const newNodes = (graph.nodes || []).filter(n => !curNodeIds.has(n.id));
           for (const n of newNodes) {
             cy.add({ data: {
-              id: n.id, label: n.name, kind: n.kind, namespace: n.namespace,
+              id: n.id, label: nodeLabel(n), name: n.name, kind: n.kind, namespace: n.namespace,
               purpose: n.purpose || '', fullLabel: n.display_name,
               meta: n.meta || {},
             }});
@@ -836,6 +912,16 @@
               }});
             }
           }
+          // Refresh labels for existing nodes (replica counts may change).
+          const nodeMap = {};
+          for (const n of (graph.nodes || [])) nodeMap[n.id] = n;
+          cy.nodes().forEach(n => {
+            const src = nodeMap[n.id()];
+            if (src) {
+              n.data('label', nodeLabel(src));
+              n.data('meta', src.meta || {});
+            }
+          });
           // Layout only the newly added nodes (don't move existing ones).
           if (newNodes.length > 0) {
             const added = cy.nodes().filter(n => !curNodeIds.has(n.id()));
@@ -853,7 +939,7 @@
       const elements = [];
       for (const n of (graph.nodes || [])) {
         elements.push({ data: {
-          id: n.id, label: n.name, kind: n.kind, namespace: n.namespace,
+          id: n.id, label: nodeLabel(n), name: n.name, kind: n.kind, namespace: n.namespace,
           purpose: n.purpose || '', fullLabel: n.display_name,
           meta: n.meta || {},
         }});
@@ -1038,6 +1124,8 @@
         const kindLabels = { traffic: 'Observed traffic', env_ref: 'Env reference', code_ref: 'Code reference', ingress_backend: 'Ingress backend', selector: 'Selector' };
         html += `<br><span style="color:#8b949e">${kindLabels[d.kind] || esc(d.kind)}</span>`;
         if (d.detail && d.detail !== 'observed') html += `<br>${esc(d.detail)}`;
+        const proto = edgeProtocolLabel(d.ports || []);
+        if (proto) html += `<br>Protocol: <span style="color:#79c0ff">${esc(proto)}</span>`;
         if (d.connCount > 0) html += `<br>Active connections: ${d.connCount}`;
         if (d.errCount > 0) html += `<br><span style="color:#f85149">Errors: ${d.errCount} (SYN_SENT/CLOSE_WAIT)</span>`;
         if (d.connCount > 0 || d.errCount > 0) html += `<br><span style="color:#484f58;font-size:0.65rem">Right-click for details</span>`;
@@ -1066,7 +1154,6 @@
     }
 
     function applyTraffic(snapshot) {
-      lastTrafficSnapshot = snapshot;
       if (!cy || !snapshot || !snapshot.connections) return;
 
       // Build lookups: "source\ttarget" → {conn, err, ports, pods, states}
@@ -1136,6 +1223,13 @@
         if (primary.ports && primary.ports.length) edge.data('ports', primary.ports);
         if (primary.pods && primary.pods.length) edge.data('pods', primary.pods);
         if (primary.states) edge.data('states', primary.states);
+        // Protocol label from port data.
+        const proto = edgeProtocolLabel(primary.ports || edge.data('ports') || []);
+        if (proto) {
+          edge.data('fullLabel', proto);
+        } else if (counts.conn > 0 || counts.err > 0) {
+          edge.data('fullLabel', counts.conn + ' conn');
+        }
         edge.removeClass('traffic-active traffic-idle traffic-error');
 
         // Show source arrow when traffic flows both ways.
@@ -1273,7 +1367,7 @@
     function logsFromMenu() {
       if (!ctxNode) return;
       const d = ctxNode.data();
-      openLogs(d.id, d.kind, d.namespace, d.label);
+      openLogs(d.id, d.kind, d.namespace, d.name);
       hideContextMenu();
     }
 
@@ -1455,7 +1549,7 @@
     function shellFromMenu() {
       if (!ctxNode) return;
       const d = ctxNode.data();
-      openShell(d.kind, d.namespace, d.label);
+      openShell(d.kind, d.namespace, d.name);
       hideContextMenu();
     }
 
@@ -1550,7 +1644,7 @@
     function describeFromMenu() {
       if (!ctxNode) return;
       const d = ctxNode.data();
-      openDescribe(d.kind, d.namespace, d.label);
+      openDescribe(d.kind, d.namespace, d.name);
       hideContextMenu();
     }
 
@@ -1596,7 +1690,7 @@
     function envFromMenu() {
       if (!ctxNode) return;
       const d = ctxNode.data();
-      openEnv(d.kind, d.namespace, d.label);
+      openEnv(d.kind, d.namespace, d.name);
       hideContextMenu();
     }
 
@@ -1661,7 +1755,7 @@
     function podsFromMenu() {
       if (!ctxNode) return;
       const d = ctxNode.data();
-      openPods(d.kind, d.namespace, d.label);
+      openPods(d.kind, d.namespace, d.name);
       hideContextMenu();
     }
 
@@ -1782,7 +1876,7 @@
 
       trafficSource = sourceId;
       trafficTarget = targetId;
-      trafficRange = '24h';
+      trafficRange = globalRange !== 'live' ? globalRange : '24h';
 
       const srcLabel = cy.$id(sourceId).data('label') || sourceId;
       const tgtLabel = cy.$id(targetId).data('label') || targetId;
@@ -1790,7 +1884,7 @@
 
       // Range buttons
       trafficRangeBar.innerHTML = ['1h','6h','24h','7d'].map(r =>
-        '<button class="traffic-range-btn' + (r === '24h' ? ' active' : '') + '" onclick="loadTrafficRange(\'' + r + '\', this)">' + r + '</button>'
+        '<button class="traffic-range-btn' + (r === trafficRange ? ' active' : '') + '" onclick="loadTrafficRange(\'' + r + '\', this)">' + r + '</button>'
       ).join('');
 
       trafficContent.innerHTML = '<span style="color:#8b949e">Loading...</span>';
@@ -1853,9 +1947,10 @@
       // Port breakdown.
       if (ports.length > 0) {
         html += '<div style="margin-top:0.75rem"><div class="traffic-chart-title">Ports</div>';
-        html += '<table class="pods-table" style="margin-top:0.25rem"><tr><th>Port</th><th>Conns</th><th>Errors</th></tr>';
+        html += '<table class="pods-table" style="margin-top:0.25rem"><tr><th>Port</th><th>Protocol</th><th>Conns</th><th>Errors</th></tr>';
         for (const p of ports) {
           html += '<tr><td style="color:#79c0ff">:' + p.port + '</td>';
+          html += '<td style="color:#8b949e">' + esc(p.protocol || '-') + '</td>';
           html += '<td style="color:#3fb950">' + p.conns + '</td>';
           html += '<td>' + (p.errors > 0 ? '<span style="color:#f85149">' + p.errors + '</span>' : '<span style="color:#484f58">0</span>') + '</td></tr>';
         }
@@ -2009,11 +2104,11 @@
       const node = ctxNode;
       hideContextMenu();
       showConfirm(
-        'Restart ' + d.kind + ' ' + d.namespace + '/' + d.label + '? This will trigger a rolling restart of all pods.',
+        'Restart ' + d.kind + ' ' + d.namespace + '/' + d.name + '? This will trigger a rolling restart of all pods.',
         function() {
           fetch('/api/restart?kind=' + encodeURIComponent(d.kind) +
                 '&namespace=' + encodeURIComponent(d.namespace) +
-                '&name=' + encodeURIComponent(d.label), { method: 'POST' })
+                '&name=' + encodeURIComponent(d.name), { method: 'POST' })
             .then(resp => {
               if (!resp.ok) return resp.text().then(t => { throw new Error(t); });
               return resp.json();
@@ -2111,6 +2206,133 @@
       if (cy) {
         cy.nodes().removeClass('log-match dimmed');
         cy.edges().removeClass('dimmed');
+      }
+    }
+
+    // --- Global time range ---
+    function setGlobalRange(range_, btn) {
+      globalRange = range_;
+      // Update button states.
+      document.querySelectorAll('#globalTimeRange .time-range-btn').forEach(b => {
+        b.classList.remove('active', 'active-hist');
+      });
+      btn.classList.add(range_ === 'live' ? 'active' : 'active-hist');
+      document.getElementById('historyIndicator').style.display = range_ === 'live' ? 'none' : 'inline';
+
+      if (range_ === 'live') {
+        // Resume live mode: re-apply last live traffic.
+        if (lastTrafficSnapshot) applyTraffic(lastTrafficSnapshot);
+        return;
+      }
+
+      // Fetch historical traffic for the selected range.
+      fetch('/api/traffic-history?range=' + encodeURIComponent(range_))
+        .then(r => {
+          if (!r.ok) return r.text().then(t => { throw new Error(t); });
+          return r.json();
+        })
+        .then(data => {
+          if (globalRange !== range_) return; // user switched range while loading
+          applyTraffic(data);
+          // Also refresh stats for the range context.
+          fetchStats();
+        })
+        .catch(err => {
+          console.error('traffic-history:', err);
+        });
+    }
+
+    // --- Topology view ---
+    function toggleTopology() {
+      topoActive = !topoActive;
+      const btn = document.getElementById('topoToggle');
+      btn.classList.toggle('active', topoActive);
+
+      if (topoActive) {
+        fetchTopology();
+      } else {
+        removeTopologyParents();
+      }
+    }
+
+    function fetchTopology() {
+      fetch('/api/topology')
+        .then(r => {
+          if (!r.ok) return r.text().then(t => { throw new Error(t); });
+          return r.json();
+        })
+        .then(data => {
+          topoData = data;
+          if (topoActive) applyTopologyParents(data);
+        })
+        .catch(err => {
+          console.error('topology:', err);
+          topoActive = false;
+          document.getElementById('topoToggle').classList.remove('active');
+        });
+    }
+
+    function applyTopologyParents(data) {
+      if (!cy || !data || !data.nodes) return;
+
+      cy.startBatch();
+
+      // Remove any existing topo parents.
+      cy.nodes('.topo-parent').remove();
+
+      // Add K8s node parent containers.
+      const k8sNodes = data.nodes || [];
+      const workloadNodes = data.workload_nodes || {};
+
+      for (const kn of k8sNodes) {
+        const parentId = 'k8snode/' + kn.name;
+        const cap = kn.capacity || {};
+        const label = kn.name + (cap.cpu ? ' | ' + cap.cpu + ' CPU' : '') + (cap.memory ? ' | ' + cap.memory : '');
+        cy.add({
+          data: { id: parentId, label: label, kind: 'K8sNode' },
+          classes: 'topo-parent',
+        });
+      }
+
+      // For workloads on a single node, set parent.
+      // For workloads on multiple nodes, pick the node with the most pods.
+      for (const kn of k8sNodes) {
+        const parentId = 'k8snode/' + kn.name;
+        for (const wid of (kn.workloads || [])) {
+          const node = cy.$id(wid);
+          if (node.length === 0) continue;
+          // Only set parent if workload is primarily on this node.
+          const nodeSet = workloadNodes[wid];
+          if (nodeSet && Object.keys(nodeSet).length > 1) {
+            // Multi-node workload — skip parenting to avoid confusion.
+            continue;
+          }
+          node.move({ parent: parentId });
+        }
+      }
+
+      cy.endBatch();
+
+      // Re-run layout to arrange compound nodes.
+      if (autoArrange) {
+        cy.layout(getLayoutConfig(true)).run();
+      }
+    }
+
+    function removeTopologyParents() {
+      if (!cy) return;
+      cy.startBatch();
+      // Unparent all workload nodes.
+      cy.nodes().forEach(n => {
+        if (n.data('parent') && n.data('parent').startsWith('k8snode/')) {
+          n.move({ parent: null });
+        }
+      });
+      // Remove topo parent nodes.
+      cy.nodes('.topo-parent').remove();
+      cy.endBatch();
+      if (autoArrange) {
+        cy.layout(getLayoutConfig(true)).run();
       }
     }
 
@@ -2217,8 +2439,14 @@
     });
 
     evtSource.addEventListener('traffic', function(e) {
-      applyTraffic(JSON.parse(e.data));
-      fetchStats();
+      const data = JSON.parse(e.data);
+      // Always store the latest live snapshot (for switching back to live mode).
+      lastTrafficSnapshot = data;
+      // Only apply if in live mode.
+      if (globalRange === 'live') {
+        applyTraffic(data);
+        fetchStats();
+      }
     });
 
     evtSource.onopen = () => {

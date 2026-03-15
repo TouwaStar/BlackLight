@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/TouwaStar/BlackLight/pkg/discovery"
+	"github.com/TouwaStar/BlackLight/pkg/model"
 	"github.com/TouwaStar/BlackLight/pkg/render"
 	"github.com/TouwaStar/BlackLight/pkg/store"
 	"github.com/TouwaStar/BlackLight/pkg/traffic"
@@ -637,6 +638,141 @@ func serveWeb(mgr *Manager, port int) error {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(results)
+	})
+
+	http.HandleFunc("/api/traffic-history", func(w http.ResponseWriter, r *http.Request) {
+		st := mgr.Store()
+		if st == nil {
+			http.Error(w, "store not available", http.StatusServiceUnavailable)
+			return
+		}
+		rangeStr := r.URL.Query().Get("range")
+		if rangeStr == "" {
+			rangeStr = "1h"
+		}
+		if strings.HasSuffix(rangeStr, "d") {
+			days, err := strconv.Atoi(strings.TrimSuffix(rangeStr, "d"))
+			if err == nil && days > 0 {
+				rangeStr = strconv.Itoa(days*24) + "h"
+			}
+		}
+		dur, err := time.ParseDuration(rangeStr)
+		if err != nil {
+			http.Error(w, "invalid range: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		conns, err := st.TrafficInRange(time.Now().Add(-dur))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if conns == nil {
+			conns = []model.TrafficConnection{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"connections": conns,
+		})
+	})
+
+	http.HandleFunc("/api/topology", func(w http.ResponseWriter, r *http.Request) {
+		d := mgr.Discoverer()
+		ctx := r.Context()
+
+		k8sNodes, err := d.Clientset().CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			http.Error(w, "list nodes: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		ns := mgr.Namespace()
+		allPods, err := d.Clientset().CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
+			FieldSelector: "status.phase=Running",
+		})
+		if err != nil {
+			http.Error(w, "list pods: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Map workload IDs to host nodes.
+		workloadToNode := make(map[string]string) // workload node ID → k8s node name
+		for i := range allPods.Items {
+			pod := &allPods.Items[i]
+			if pod.Spec.NodeName == "" {
+				continue
+			}
+			ownerKind, ownerName := traffic.WorkloadOwnerFromPod(pod)
+			if ownerKind == "" {
+				continue
+			}
+			wid := pod.Namespace + "/" + ownerKind + "/" + ownerName
+			// A workload may have pods on multiple nodes; pick first seen.
+			if _, exists := workloadToNode[wid]; !exists {
+				workloadToNode[wid] = pod.Spec.NodeName
+			}
+		}
+
+		// Also track workloads with pods on MULTIPLE nodes.
+		workloadNodes := make(map[string]map[string]bool) // wid → set of node names
+		for i := range allPods.Items {
+			pod := &allPods.Items[i]
+			if pod.Spec.NodeName == "" {
+				continue
+			}
+			ownerKind, ownerName := traffic.WorkloadOwnerFromPod(pod)
+			if ownerKind == "" {
+				continue
+			}
+			wid := pod.Namespace + "/" + ownerKind + "/" + ownerName
+			if workloadNodes[wid] == nil {
+				workloadNodes[wid] = make(map[string]bool)
+			}
+			workloadNodes[wid][pod.Spec.NodeName] = true
+		}
+
+		type topoNode struct {
+			Name       string            `json:"name"`
+			Labels     map[string]string `json:"labels,omitempty"`
+			Capacity   map[string]string `json:"capacity,omitempty"`
+			Conditions []string          `json:"conditions,omitempty"`
+			Workloads  []string          `json:"workloads"`
+		}
+
+		result := make([]topoNode, 0, len(k8sNodes.Items))
+		for i := range k8sNodes.Items {
+			node := &k8sNodes.Items[i]
+			tn := topoNode{
+				Name:      node.Name,
+				Labels:    node.Labels,
+				Capacity:  make(map[string]string),
+				Workloads: []string{},
+			}
+			if cpu := node.Status.Capacity.Cpu(); cpu != nil {
+				tn.Capacity["cpu"] = cpu.String()
+			}
+			if mem := node.Status.Capacity.Memory(); mem != nil {
+				memMiB := mem.Value() / (1024 * 1024)
+				tn.Capacity["memory"] = fmt.Sprintf("%d MiB", memMiB)
+			}
+			for _, cond := range node.Status.Conditions {
+				if cond.Status == "True" {
+					tn.Conditions = append(tn.Conditions, string(cond.Type))
+				}
+			}
+			// Find workloads placed on this node.
+			for wid, nodeName := range workloadToNode {
+				if nodeName == node.Name {
+					tn.Workloads = append(tn.Workloads, wid)
+				}
+			}
+			result = append(result, tn)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"nodes":          result,
+			"workload_nodes": workloadNodes,
+		})
 	})
 
 	addr := ":" + strconv.Itoa(port)

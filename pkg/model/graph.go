@@ -40,9 +40,51 @@ type TrafficConnection struct {
 
 // PortCount groups connections by remote port.
 type PortCount struct {
-	Port   uint16 `json:"port"`
-	Conns  int    `json:"conns"`
-	Errors int    `json:"errors"`
+	Port     uint16 `json:"port"`
+	Conns    int    `json:"conns"`
+	Errors   int    `json:"errors"`
+	Protocol string `json:"protocol,omitempty"` // inferred protocol name (e.g. "HTTP", "gRPC", "PostgreSQL")
+}
+
+// PortProtocol returns the likely protocol name for a well-known port.
+// Returns empty string for unknown ports.
+func PortProtocol(port uint16) string {
+	switch port {
+	case 80, 8080, 8000, 8888, 3000, 5000, 9090:
+		return "HTTP"
+	case 443, 8443:
+		return "HTTPS"
+	case 50051:
+		return "gRPC"
+	case 5432:
+		return "PostgreSQL"
+	case 3306:
+		return "MySQL"
+	case 6379:
+		return "Redis"
+	case 27017:
+		return "MongoDB"
+	case 9092:
+		return "Kafka"
+	case 4222:
+		return "NATS"
+	case 2379, 2380:
+		return "etcd"
+	case 53:
+		return "DNS"
+	case 5672, 5671:
+		return "AMQP"
+	case 9200, 9300:
+		return "Elasticsearch"
+	case 11211:
+		return "Memcached"
+	case 6443:
+		return "Kubernetes API"
+	case 4317, 4318:
+		return "OpenTelemetry"
+	default:
+		return ""
+	}
 }
 
 // PodTraffic shows per-pod connection details.

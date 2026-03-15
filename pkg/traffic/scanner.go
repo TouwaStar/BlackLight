@@ -294,7 +294,7 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 		}
 		// Port breakdown (sorted by total count, top 10).
 		for port, counts := range d.ports {
-			tc.Ports = append(tc.Ports, model.PortCount{Port: port, Conns: counts[0], Errors: counts[1]})
+			tc.Ports = append(tc.Ports, model.PortCount{Port: port, Conns: counts[0], Errors: counts[1], Protocol: model.PortProtocol(port)})
 		}
 		sort.Slice(tc.Ports, func(i, j int) bool {
 			return (tc.Ports[i].Conns + tc.Ports[i].Errors) > (tc.Ports[j].Conns + tc.Ports[j].Errors)

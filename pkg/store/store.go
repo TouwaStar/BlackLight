@@ -290,6 +290,31 @@ func (s *Store) LoadTrafficEdges() ([]model.Edge, error) {
 	return edges, rows.Err()
 }
 
+// TrafficInRange returns aggregated traffic connections from stored buckets within a time range.
+func (s *Store) TrafficInRange(since time.Time) ([]model.TrafficConnection, error) {
+	rows, err := s.db.Query(`
+		SELECT source, target, SUM(conns), SUM(errors)
+		FROM traffic_log
+		WHERE bucket >= ?
+		GROUP BY source, target
+		HAVING SUM(conns) > 0 OR SUM(errors) > 0
+	`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var conns []model.TrafficConnection
+	for rows.Next() {
+		var c model.TrafficConnection
+		if err := rows.Scan(&c.SourceWorkload, &c.TargetService, &c.ConnCount, &c.ErrorCount); err != nil {
+			return nil, err
+		}
+		conns = append(conns, c)
+	}
+	return conns, rows.Err()
+}
+
 // EdgeHistory returns time-series buckets for a specific edge since the given time.
 func (s *Store) EdgeHistory(source, target string, since time.Time) ([]Bucket, error) {
 	sinceBucket := (since.Unix() / bucketSize) * bucketSize
