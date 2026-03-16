@@ -35,6 +35,8 @@ const (
 	DNSTimeout = time.Second
 	// PartialResultDelay is how long the exec phase must run before emitting partial results.
 	PartialResultDelay = 3 * time.Second
+	// APIListTimeout limits K8s API list calls so they don't hang on bad connectivity.
+	APIListTimeout = 10 * time.Second
 )
 
 // Scanner reads /proc/net/tcp from pods to discover live TCP connections.
@@ -65,6 +67,10 @@ func (s *Scanner) Scan(ctx context.Context) (*model.TrafficSnapshot, error) {
 // ScanWithProgress runs a traffic scan, calling onProgress with partial results
 // as pods respond (at most once per second). Returns the final complete snapshot.
 func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.TrafficSnapshot)) (*model.TrafficSnapshot, error) {
+	// Overall scan timeout: don't let a single scan cycle take more than 30s.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	scanStart := time.Now()
 	nsList, err := s.listNamespaces(ctx)
 	if err != nil {
@@ -80,8 +86,13 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 	knownIPs := make(map[string]bool)             // all cluster-internal IPs (nodes, system pods)
 	workloadPods := make(map[string]podRef)       // workload node ID → one pod
 
+	// Use a sub-context with timeout for K8s API list calls so they don't
+	// hang indefinitely on spotty connections.
+	listCtx, listCancel := context.WithTimeout(ctx, APIListTimeout)
+	defer listCancel()
+
 	// Collect node IPs (kubelet health checks, kube-proxy come from these).
-	nodes, err := s.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	nodes, err := s.clientset.CoreV1().Nodes().List(listCtx, metav1.ListOptions{})
 	if err == nil {
 		for i := range nodes.Items {
 			for _, addr := range nodes.Items[i].Status.Addresses {
@@ -91,7 +102,7 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 	}
 
 	// Single cluster-wide listing for services and pods (instead of per-namespace loops).
-	svcs, err := s.clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	svcs, err := s.clientset.CoreV1().Services("").List(listCtx, metav1.ListOptions{})
 	if err == nil {
 		for i := range svcs.Items {
 			svc := &svcs.Items[i]
@@ -102,7 +113,7 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 		}
 	}
 
-	allPods, err := s.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+	allPods, err := s.clientset.CoreV1().Pods("").List(listCtx, metav1.ListOptions{
 		FieldSelector: "status.phase=Running",
 	})
 	if err != nil {
@@ -145,6 +156,25 @@ func (s *Scanner) ScanWithProgress(ctx context.Context, onProgress func(*model.T
 	var wg sync.WaitGroup
 
 	execNow := time.Now()
+	// Count how many pods are on cooldown. If ALL pods are on cooldown and
+	// we successfully listed pods (connectivity recovered), clear cooldowns
+	// so we don't wait 2 minutes doing nothing.
+	cooledDown := 0
+	for _, pr := range workloadPods {
+		if expiry, ok := s.failedPods.Load(pr.name); ok {
+			if t, valid := expiry.(time.Time); valid && execNow.Before(t) {
+				cooledDown++
+			}
+		}
+	}
+	if cooledDown > 0 && cooledDown == len(workloadPods) {
+		log.Printf("traffic: all %d pods on cooldown, clearing for retry", cooledDown)
+		s.failedPods.Range(func(key, _ any) bool {
+			s.failedPods.Delete(key)
+			return true
+		})
+	}
+
 	for wid, pr := range workloadPods {
 		// Skip pods that recently failed exec (2-minute cooldown).
 		if expiry, ok := s.failedPods.Load(pr.name); ok {

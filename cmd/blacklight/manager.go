@@ -79,7 +79,9 @@ func (m *Manager) Reconfigure(ctx context.Context, kubeContext, namespace string
 	if err != nil {
 		return err
 	}
-	g, err := d.Discover(ctx)
+	discoverCtx, discoverCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer discoverCancel()
+	g, err := d.Discover(discoverCtx)
 	if err != nil {
 		return err
 	}
@@ -147,6 +149,14 @@ func (m *Manager) restoreTrafficEdgesLocked() {
 	m.mergeTrafficEdgesLocked()
 }
 
+// BroadcastGraph sends the current graph to all SSE subscribers.
+func (m *Manager) BroadcastGraph() {
+	m.mu.RLock()
+	g := m.graph
+	m.mu.RUnlock()
+	m.broadcast(Event{Type: "graph", Data: g})
+}
+
 func (m *Manager) Graph() *model.Graph {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -200,7 +210,9 @@ func (m *Manager) discoveryLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			newGraph, err := m.discoverer.Discover(ctx)
+			discoverCtx, discoverCancel := context.WithTimeout(ctx, 15*time.Second)
+			newGraph, err := m.discoverer.Discover(discoverCtx)
+			discoverCancel()
 			if err != nil {
 				log.Printf("discovery refresh: %v", err)
 				continue

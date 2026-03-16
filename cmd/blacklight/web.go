@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +39,22 @@ const (
 
 //go:embed static
 var staticFS embed.FS
+
+// checkOrigin rejects cross-origin mutating requests (CSRF protection).
+// Allows requests with no Origin (e.g. curl), or where the Origin matches the Host.
+func checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true // non-browser clients (curl, etc.)
+	}
+	// Strip scheme to compare host:port.
+	originHost := strings.TrimPrefix(strings.TrimPrefix(origin, "https://"), "http://")
+	host := r.Host
+	if host == "" {
+		host = r.Header.Get("Host")
+	}
+	return originHost == host
+}
 
 func serveWeb(mgr *Manager, port int) error {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -181,6 +198,10 @@ func serveWeb(mgr *Manager, port int) error {
 	http.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !checkOrigin(r) {
+			http.Error(w, "cross-origin request blocked", http.StatusForbidden)
 			return
 		}
 		var req struct {
@@ -408,6 +429,10 @@ func serveWeb(mgr *Manager, port int) error {
 			http.Error(w, "POST required", http.StatusMethodNotAllowed)
 			return
 		}
+		if !checkOrigin(r) {
+			http.Error(w, "cross-origin request blocked", http.StatusForbidden)
+			return
+		}
 		kind, namespace, name, err := workloadParams(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -506,6 +531,60 @@ func serveWeb(mgr *Manager, port int) error {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(metrics)
+	})
+
+	http.HandleFunc("/api/kubectl", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		if !checkOrigin(r) {
+			http.Error(w, "cross-origin request blocked", http.StatusForbidden)
+			return
+		}
+		var req struct {
+			Command string `json:"command"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		raw := strings.TrimSpace(req.Command)
+		if raw == "" {
+			http.Error(w, "empty command", http.StatusBadRequest)
+			return
+		}
+
+		// Strip leading "kubectl" if present so users can paste full commands.
+		raw = strings.TrimPrefix(raw, "kubectl ")
+
+		args := strings.Fields(raw)
+
+		// Block interactive / destructive-to-blacklight flags.
+		for _, a := range args {
+			if a == "-it" || a == "--stdin" || a == "-i" || a == "--tty" || a == "edit" {
+				http.Error(w, "interactive commands are not supported", http.StatusBadRequest)
+				return
+			}
+		}
+
+		// Inject current context if one is set.
+		if ctx := mgr.KubeContext(); ctx != "" {
+			args = append(args, "--context", ctx)
+		}
+
+		cmd := exec.CommandContext(r.Context(), "kubectl", args...)
+		out, err := cmd.CombinedOutput()
+		w.Header().Set("Content-Type", "application/json")
+		resp := struct {
+			Output string `json:"output"`
+			Error  string `json:"error,omitempty"`
+		}{Output: string(out)}
+		if err != nil {
+			resp.Error = err.Error()
+			w.WriteHeader(http.StatusOK) // still 200 so frontend gets the output
+		}
+		json.NewEncoder(w).Encode(resp)
 	})
 
 	http.HandleFunc("/api/search-logs", func(w http.ResponseWriter, r *http.Request) {

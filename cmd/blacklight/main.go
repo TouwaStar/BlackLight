@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/TouwaStar/BlackLight/pkg/discovery"
+	"github.com/TouwaStar/BlackLight/pkg/model"
 	"github.com/TouwaStar/BlackLight/pkg/render"
 	"github.com/TouwaStar/BlackLight/pkg/store"
 )
@@ -42,10 +44,20 @@ func main() {
 	}
 
 	ctx := context.Background()
-	g, err := discoverer.Discover(ctx)
+
+	// Use a timeout for initial discovery so the web server can start even
+	// with a spotty connection. We'll retry in the background if it fails.
+	discoverCtx, discoverCancel := context.WithTimeout(ctx, 15*time.Second)
+	g, err := discoverer.Discover(discoverCtx)
+	discoverCancel()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "discover: %v\n", err)
-		os.Exit(1)
+		if *output != "web" {
+			fmt.Fprintf(os.Stderr, "discover: %v\n", err)
+			os.Exit(1)
+		}
+		// For web mode, start with an empty graph and retry later.
+		fmt.Fprintf(os.Stderr, "initial discovery failed (will retry): %v\n", err)
+		g = &model.Graph{}
 	}
 
 	if *source != "" {
@@ -93,7 +105,38 @@ func main() {
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		go mgr.Run(ctx)
-		if err := serveWeb(mgr, *port); err != nil {
+
+		// Start web server in the background so we can also start background
+		// recovery if the initial graph was empty (spotty connection).
+		webErr := make(chan error, 1)
+		go func() { webErr <- serveWeb(mgr, *port) }()
+
+		// If the initial discovery returned an empty graph, retry in background
+		// so the UI becomes usable as soon as connectivity recovers.
+		if g == nil || len(g.Nodes) == 0 {
+			go func() {
+				for {
+					time.Sleep(10 * time.Second)
+					newG, err := discoverer.Discover(ctx)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "background discovery retry: %v\n", err)
+						continue
+					}
+					if len(newG.Nodes) > 0 {
+						if *source != "" {
+							if edges, err := discovery.ScanSource(*source); err == nil {
+								discovery.MergeSourceEdges(newG, edges)
+							}
+						}
+						mgr.SetInitialGraph(newG)
+						mgr.BroadcastGraph()
+						break
+					}
+				}
+			}()
+		}
+
+		if err := <-webErr; err != nil {
 			fmt.Fprintf(os.Stderr, "web: %v\n", err)
 			os.Exit(1)
 		}

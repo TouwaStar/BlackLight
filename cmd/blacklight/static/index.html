@@ -338,6 +338,43 @@
       display: none; font-size: 0.65rem; color: #d29922; font-weight: 600;
       margin-left: 0.3rem;
     }
+    #kubectlBar {
+      display: none; flex-shrink: 0;
+      background: #161b22; border-top: 1px solid #30363d;
+      flex-direction: column; max-height: 45vh;
+    }
+    #kubectlBar.open { display: flex; }
+    #kubectlHeader {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.3rem 0.75rem; border-bottom: 1px solid #30363d; flex-shrink: 0;
+    }
+    #kubectlHeader span { font-size: 0.75rem; font-weight: 600; color: #e6edf3; }
+    #kubectlInput {
+      flex: 1; font-family: inherit; font-size: 0.75rem;
+      background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+      border-radius: 4px; padding: 0.3rem 0.6rem; outline: none;
+    }
+    #kubectlInput:focus { border-color: #58a6ff; }
+    #kubectlInput::placeholder { color: #484f58; }
+    #kubectlRun {
+      font-family: inherit; font-size: 0.7rem; font-weight: 600;
+      background: #238636; color: #fff; border: none; border-radius: 4px;
+      padding: 0.3rem 0.75rem; cursor: pointer;
+    }
+    #kubectlRun:hover { background: #2ea043; }
+    #kubectlRun:disabled { opacity: 0.5; cursor: default; }
+    #kubectlOutput {
+      flex: 1; overflow-y: auto; padding: 0.5rem 0.75rem;
+      font-size: 0.7rem; line-height: 1.5; white-space: pre-wrap;
+      word-break: break-all; color: #8b949e; background: #0d1117;
+      margin: 0; min-height: 60px;
+    }
+    .kubectl-error { color: #f85149; }
+    .kubectl-history-item {
+      color: #484f58; cursor: pointer; font-size: 0.65rem; padding: 0.1rem 0.3rem;
+      border-radius: 3px;
+    }
+    .kubectl-history-item:hover { color: #e6edf3; background: #30363d; }
     .topo-node {
       font-size: 9px; color: #8b949e; text-transform: uppercase;
       letter-spacing: 0.03em;
@@ -366,6 +403,7 @@
       <button id="topoToggle" class="filter-btn" onclick="toggleTopology()">Topology</button>
       <button id="autoArrange" class="filter-btn active" onclick="toggleAutoArrange()">Auto arrange: ON</button>
       <button id="deadFilter" class="filter-btn" onclick="toggleDeadFilter()">Show dead services</button>
+      <button id="kubectlToggle" class="filter-btn" onclick="toggleKubectl()">kubectl</button>
       <a href="/api/graph">JSON</a>
       <a href="/api/mermaid">Mermaid</a>
     </div>
@@ -416,6 +454,17 @@
       </div>
     </div>
     <div id="termContainer"></div>
+  </div>
+  <div id="kubectlBar">
+    <div id="kubectlHeader">
+      <span>kubectl</span>
+      <input id="kubectlInput" type="text" placeholder="e.g. scale deployment avn --replicas=0 -n staging" onkeydown="if(event.key==='Enter')runKubectl()">
+      <button id="kubectlRun" onclick="runKubectl()">Run</button>
+      <div id="kubectlHistory" style="display:flex;gap:0.3rem;overflow-x:auto"></div>
+      <button class="log-btn" onclick="clearKubectl()">Clear</button>
+      <button class="log-btn" onclick="closeKubectl()">Close</button>
+    </div>
+    <pre id="kubectlOutput">Ready. Commands run against the currently selected context.</pre>
   </div>
   <div id="tooltip"></div>
   <div id="contextMenu">
@@ -2463,6 +2512,111 @@
     window.addEventListener('beforeunload', () => {
       savePositions();
       persistPositions();
+    });
+
+    // --- kubectl bar ---
+    const kubectlBar = document.getElementById('kubectlBar');
+    const kubectlInput = document.getElementById('kubectlInput');
+    const kubectlOutput = document.getElementById('kubectlOutput');
+    const kubectlHistory = document.getElementById('kubectlHistory');
+    const kubectlCmdHistory = [];
+    let kubectlHistoryIdx = -1;
+
+    function toggleKubectl() {
+      const btn = document.getElementById('kubectlToggle');
+      const open = kubectlBar.classList.toggle('open');
+      btn.classList.toggle('active', open);
+      if (open) kubectlInput.focus();
+    }
+    function closeKubectl() {
+      kubectlBar.classList.remove('open');
+      document.getElementById('kubectlToggle').classList.remove('active');
+    }
+    function clearKubectl() {
+      kubectlOutput.textContent = 'Ready.';
+      kubectlOutput.className = '';
+    }
+
+    async function runKubectl() {
+      const raw = kubectlInput.value.trim();
+      if (!raw) return;
+      const runBtn = document.getElementById('kubectlRun');
+      runBtn.disabled = true;
+      kubectlOutput.textContent = '$ kubectl ' + raw.replace(/^kubectl\s+/, '') + '\n\nRunning...';
+      kubectlOutput.className = '';
+
+      // Track history.
+      const cmd = raw.replace(/^kubectl\s+/, '');
+      const idx = kubectlCmdHistory.indexOf(cmd);
+      if (idx !== -1) kubectlCmdHistory.splice(idx, 1);
+      kubectlCmdHistory.unshift(cmd);
+      if (kubectlCmdHistory.length > 20) kubectlCmdHistory.pop();
+      kubectlHistoryIdx = -1;
+      renderKubectlHistory();
+
+      try {
+        const resp = await fetch('/api/kubectl', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({command: raw})
+        });
+        const data = await resp.json();
+        const prefix = '$ kubectl ' + cmd + '\n\n';
+        if (data.error) {
+          kubectlOutput.textContent = prefix + (data.output || data.error);
+          kubectlOutput.className = 'kubectl-error';
+        } else {
+          kubectlOutput.textContent = prefix + (data.output || '(no output)');
+          kubectlOutput.className = '';
+        }
+      } catch(e) {
+        kubectlOutput.textContent = 'Request failed: ' + e.message;
+        kubectlOutput.className = 'kubectl-error';
+      }
+      runBtn.disabled = false;
+      kubectlInput.select();
+    }
+
+    function renderKubectlHistory() {
+      kubectlHistory.innerHTML = '';
+      kubectlCmdHistory.slice(0, 8).forEach(cmd => {
+        const el = document.createElement('span');
+        el.className = 'kubectl-history-item';
+        el.textContent = cmd.length > 40 ? cmd.slice(0, 37) + '...' : cmd;
+        el.title = cmd;
+        el.onclick = () => { kubectlInput.value = cmd; kubectlInput.focus(); };
+        kubectlHistory.appendChild(el);
+      });
+    }
+
+    // Arrow up/down for history in kubectl input.
+    kubectlInput.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (kubectlHistoryIdx < kubectlCmdHistory.length - 1) {
+          kubectlHistoryIdx++;
+          kubectlInput.value = kubectlCmdHistory[kubectlHistoryIdx];
+        }
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (kubectlHistoryIdx > 0) {
+          kubectlHistoryIdx--;
+          kubectlInput.value = kubectlCmdHistory[kubectlHistoryIdx];
+        } else {
+          kubectlHistoryIdx = -1;
+          kubectlInput.value = '';
+        }
+      } else if (e.key === 'Escape') {
+        closeKubectl();
+      }
+    });
+
+    // Ctrl+K to toggle kubectl bar.
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        toggleKubectl();
+      }
     });
   </script>
 </body>

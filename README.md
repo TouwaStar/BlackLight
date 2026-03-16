@@ -10,11 +10,13 @@ A **Go** tool that discovers services and workloads from your **Kubernetes** clu
   - Ingress resources and Traefik IngressRoute CRDs
   - Env-based references (`*_HOST`, `*_URL`, `*_SERVICE`, `*_ADDR`, `*_DB`, etc.)
 - **Monitors live traffic** by reading `/proc/net/tcp` from pods to discover active TCP connections — creates graph edges automatically from observed traffic
+- **Protocol detection** — maps well-known ports to protocol names (HTTP, gRPC, PostgreSQL, Redis, Kafka, etc.) and displays them on edges and in traffic details
 - **Error detection** — flags connections in SYN_SENT or CLOSE_WAIT state as errors, shown as dashed red edges
 - **Cloud traffic classification** — identifies connections to AWS, Azure, and GCP infrastructure via reverse DNS, shown separately from external user traffic
 - **Highlights dead services** — nodes with zero observed traffic are flagged for potential removal
 - **Context & namespace switching** — switch Kubernetes contexts and namespaces from the web UI without restarting
 - **Persists state** — layout positions, traffic-discovered edges, and node statistics survive restarts (SQLite)
+- **Resilient connectivity** — handles spotty connections gracefully: web server starts immediately, background retries on failure, automatic recovery with no restart needed
 - **Optional source scanning** — walks local source trees to find URL-based service references
 
 ## Output formats
@@ -108,7 +110,11 @@ CLI flags override config file values.
 - **Resource describe** — kubectl-describe-like output for any resource, including events
 - **Environment variables** — view resolved env vars per container, with ConfigMap/Secret source tracking
 - **Pod list with metrics** — see all pods for a workload with status, restarts, age, and CPU/memory usage (requires metrics-server)
-- **Traffic details panel** — right-click an edge to see per-port breakdown, per-pod connection distribution, TCP state analysis (ESTABLISHED/TIME_WAIT/SYN_SENT/CLOSE_WAIT), and connection history charts
+- **Traffic details panel** — right-click an edge to see per-port breakdown with protocol names, per-pod connection distribution, TCP state analysis (ESTABLISHED/TIME_WAIT/SYN_SENT/CLOSE_WAIT), and connection history charts
+- **Time-travel / replay** — global time range selector (Live/1h/6h/24h/7d) that affects all displayed data; pauses live updates in historical mode
+- **Pod count badges** — replica counts shown on node labels (e.g. `service-name [2/3]`)
+- **Cluster topology view** — toggle to show K8s nodes as compound containers with workloads nested inside
+- **kubectl console** — built-in kubectl command bar (Ctrl+K) with command history, runs against the currently selected context
 - **Rolling restart** — restart Deployments, StatefulSets, or DaemonSets from the UI with confirmation
 - **Export** — download the current graph as JSON or Mermaid diagram from the UI
 
@@ -155,7 +161,10 @@ The web UI is backed by a REST + SSE API:
 | `/api/pods` | GET | List pods for a workload with status, restarts, age, node, and IP |
 | `/api/metrics` | GET | CPU and memory usage per pod (requires metrics-server) |
 | `/api/restart` | POST | Trigger a rolling restart of a Deployment, StatefulSet, or DaemonSet |
+| `/api/kubectl` | POST | Execute a kubectl command against the current context (`{"command":"..."}`) |
 | `/api/search-logs` | GET | Search logs across all workload pods (`?q=...`) — returns matching node IDs and hit counts |
+| `/api/traffic-history` | GET | Aggregated historical traffic (`?range=1h\|6h\|24h\|7d`) |
+| `/api/topology` | GET | K8s node topology with workload-to-node mapping |
 
 ## Requirements
 
