@@ -79,7 +79,7 @@ func (m *Manager) Reconfigure(ctx context.Context, kubeContext, namespace string
 	if err != nil {
 		return err
 	}
-	discoverCtx, discoverCancel := context.WithTimeout(ctx, 15*time.Second)
+	discoverCtx, discoverCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer discoverCancel()
 	g, err := d.Discover(discoverCtx)
 	if err != nil {
@@ -106,6 +106,7 @@ func (m *Manager) Reconfigure(ctx context.Context, kubeContext, namespace string
 	m.traffic = nil
 	m.recentScans = nil
 	m.trafficEdges = make(map[string]model.Edge)
+	m.trafficNodes = make(map[string]model.Node)
 	m.restoreTrafficEdgesLocked()
 	m.mu.Unlock()
 
@@ -210,8 +211,11 @@ func (m *Manager) discoveryLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			m.mu.RLock()
+			d := m.discoverer
+			m.mu.RUnlock()
 			discoverCtx, discoverCancel := context.WithTimeout(ctx, 15*time.Second)
-			newGraph, err := m.discoverer.Discover(discoverCtx)
+			newGraph, err := d.Discover(discoverCtx)
 			discoverCancel()
 			if err != nil {
 				log.Printf("discovery refresh: %v", err)
@@ -252,6 +256,7 @@ func (m *Manager) trafficLoop(ctx context.Context) {
 	scan := func() {
 		m.mu.RLock()
 		idMap := m.idMap
+		scanner := m.scanner
 		m.mu.RUnlock()
 
 		// Broadcast partial results as pods respond so traffic appears quickly.
@@ -260,7 +265,7 @@ func (m *Manager) trafficLoop(ctx context.Context) {
 			m.broadcast(Event{Type: "traffic", Data: translated})
 		}
 
-		snap, err := m.scanner.ScanWithProgress(ctx, onProgress)
+		snap, err := scanner.ScanWithProgress(ctx, onProgress)
 		if err != nil {
 			log.Printf("traffic scan: %v", err)
 			return

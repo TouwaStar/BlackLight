@@ -7,7 +7,10 @@ import (
 	"strings"
 
 	"github.com/TouwaStar/BlackLight/pkg/model"
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -92,39 +95,69 @@ func (d *Discoverer) Discover(ctx context.Context) (*model.Graph, error) {
 	}
 
 	for _, ns := range nsList {
-		// Deployments and StatefulSets (workloads)
+		// Deployments and StatefulSets (workloads).
+		// Tolerate partial failures: log and continue so a single timeout
+		// doesn't throw away the entire graph.
 		deployments, err := d.clientset.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("list deployments in %s: %w", ns, err)
+			log.Printf("discover: list deployments in %s: %v", ns, err)
+			deployments = nil
 		}
 		statefulSets, err := d.clientset.AppsV1().StatefulSets(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("list statefulsets in %s: %w", ns, err)
+			log.Printf("discover: list statefulsets in %s: %v", ns, err)
+			statefulSets = nil
 		}
 		daemonSets, err := d.clientset.AppsV1().DaemonSets(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("list daemonsets in %s: %w", ns, err)
+			log.Printf("discover: list daemonsets in %s: %v", ns, err)
+			daemonSets = nil
 		}
 		cronJobs, err := d.clientset.BatchV1().CronJobs(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("list cronjobs in %s: %w", ns, err)
+			log.Printf("discover: list cronjobs in %s: %v", ns, err)
+			cronJobs = nil
 		}
 		jobs, err := d.clientset.BatchV1().Jobs(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("list jobs in %s: %w", ns, err)
+			log.Printf("discover: list jobs in %s: %v", ns, err)
+			jobs = nil
 		}
 		// Services
 		services, err := d.clientset.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("list services in %s: %w", ns, err)
+			log.Printf("discover: list services in %s: %v", ns, err)
+			services = nil
 		}
 		// Ingress
 		ingresses, err := d.clientset.NetworkingV1().Ingresses(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("list ingresses in %s: %w", ns, err)
+			log.Printf("discover: list ingresses in %s: %v", ns, err)
+			ingresses = nil
 		}
 
 		// Add workload nodes and service -> workload edges (via selector match)
+		if deployments == nil {
+			deployments = &appsv1.DeploymentList{}
+		}
+		if statefulSets == nil {
+			statefulSets = &appsv1.StatefulSetList{}
+		}
+		if daemonSets == nil {
+			daemonSets = &appsv1.DaemonSetList{}
+		}
+		if cronJobs == nil {
+			cronJobs = &batchv1.CronJobList{}
+		}
+		if jobs == nil {
+			jobs = &batchv1.JobList{}
+		}
+		if services == nil {
+			services = &corev1.ServiceList{}
+		}
+		if ingresses == nil {
+			ingresses = &networkingv1.IngressList{}
+		}
 		for i := range deployments.Items {
 			dep := &deployments.Items[i]
 			id := model.NodeID("Deployment", ns, dep.Name)
